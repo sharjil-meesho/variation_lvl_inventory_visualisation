@@ -15,7 +15,10 @@ Data window: **2026-04-01 → 2026-06-30** (anchor `2026-04-01`), same as the PI
    PID-level site) — filters on supplier priority, super portfolio, portfolio, sub-category
    (sscat); search by PID or SID substring.
 2. **Day-on-day inventory** — a **Variation** dropdown appears once a PID×SID is selected
-   (defaults to the variation with the most orders). The chart is a [Plotly.js](https://plotly.com/javascript/)
+   (defaults to the variation with the most orders), alongside pills for supplier priority,
+   sub-category (sscat), biz-fin category, and the selected variation's SLP (the first three
+   are PID×SID-level, from `data/index.json`; SLP is per-variation and updates when you switch
+   variations). The chart is a [Plotly.js](https://plotly.com/javascript/)
    line chart (loaded from a CDN, same as the PID-level site) with a real calendar x-axis,
    drag-to-zoom / scroll-to-zoom, and a hover tooltip showing the day's inventory and its
    day-over-day delta. Reference lines for safety stock, avg inventory, order-up-to (est.,
