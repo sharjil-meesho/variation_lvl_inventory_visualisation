@@ -15,8 +15,15 @@ Data window: **2026-04-01 → 2026-06-30** (anchor `2026-04-01`), same as the PI
    PID-level site) — filters on supplier priority, super portfolio, portfolio, sub-category
    (sscat); search by PID or SID substring.
 2. **Day-on-day inventory** — a **Variation** dropdown appears once a PID×SID is selected
-   (defaults to the variation with the most orders). The chart, restock markers, and safety/cycle
-   reference lines all update to the selected variation.
+   (defaults to the variation with the most orders). The chart is a [Plotly.js](https://plotly.com/javascript/)
+   line chart (loaded from a CDN, same as the PID-level site) with a real calendar x-axis,
+   drag-to-zoom / scroll-to-zoom, and a hover tooltip showing the day's inventory and its
+   day-over-day delta. Reference lines for safety stock, avg inventory, order-up-to (est.,
+   a heuristic = safety + 2×cycle stock — not a warehouse field), and min inventory are
+   overlaid, along with restock markers (diamonds). An **"Overlay orders (DoD)"** toggle
+   (None / Placed orders / Dispatched orders) draws the chosen order series as a filled area
+   on a secondary right-hand axis, on the same chart as live inventory — not a separate panel.
+   Everything updates to the selected variation.
 3. **ROCE breakdown** — DIO (safety + cycle + transit) + DSO for the *selected variation only*,
    sourced directly from `scrap.roce_eqn__var_lvl_calcs_kri_enriched`. Unlike the PID-level site,
    ODNR fraction and NMV/GMV fraction are real here (not stuck at 0) — the source table has them.
@@ -75,8 +82,14 @@ keep them in sync if you change either.
 ## Known limitations / heuristics (call these out, don't hide them)
 
 - **Restock detection** on the day-on-day chart is a client-side heuristic — a day-over-day
-  inventory jump ≥ `max(5, 2×that variation's total_drr, 10% of the prior day's inventory)` —
+  inventory jump ≥ `max(5, 2×that variation's total_drr, 10% of that day's post-jump inventory)` —
   not a logged restock event. Same formula the PID-level site used.
+- **"order-up-to (est)" reference line** is `safety stock + 2×cycle stock`, the same heuristic
+  the PID-level site plots — not a warehouse-computed target level.
+- **Chart requires Plotly.js from a CDN** (cdnjs, falling back to jsdelivr then unpkg) — same
+  dependency the PID-level site has. If all three are unreachable (fully offline, or a network
+  policy blocks all three), the day-on-day chart shows a "failed to load" message instead of
+  silently breaking; everything else on the page still works.
 - **"dead ~Xd" in the dead-sample dropdown** is `avg_inventory ÷ that variation's own total_drr`,
   a rough order-of-magnitude proxy, not the warehouse-computed `avg_dead_fg` metric the
   PID-level site had (that used a category-level DRR reference and isn't available in the

@@ -4,6 +4,27 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Inventory Explorer — Variation Level</title>
+<script>
+// Load Plotly.js (with CDN fallbacks) for the day-on-day inventory chart — same loader
+// pattern as the PID-level sibling site, so a blocked CDN degrades gracefully instead of
+// breaking the whole page.
+window.__plotlyReady = new Promise(function(resolve){
+  var srcs = [
+    "https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.2/plotly.min.js",
+    "https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js",
+    "https://unpkg.com/plotly.js-dist-min@2.35.2/plotly.min.js"
+  ];
+  function tryLoad(i){
+    if(i>=srcs.length){ resolve(false); return; }
+    var s=document.createElement("script");
+    s.src=srcs[i];
+    s.onload=function(){ resolve(true); };
+    s.onerror=function(){ tryLoad(i+1); };
+    document.head.appendChild(s);
+  }
+  tryLoad(0);
+});
+</script>
 <style>
   :root {
     color-scheme: light;
@@ -277,6 +298,22 @@ const NSHARDS = 256;
 const NDEAD = 64;
 const ANCHOR = "2026-04-01";
 const COLORS = { blue:"#2a78d6", orange:"#eb6834", aqua:"#1baf7a", yellow:"#eda100", magenta:"#e87ba4", green:"#008300", violet:"#4a3aa7", red:"#e34948" };
+const ANCHOR_MS = Date.parse(ANCHOR + "T00:00:00Z");
+
+// reference levels drawn on the day-on-day chart — same set as the PID-level sibling site.
+// "peak" (order-up-to est.) isn't a warehouse field; it's the same heuristic the PID-level
+// site uses: safety stock + 2×cycle stock.
+const LEVELS = [
+  ["saf",  "#E24B4A", "dash",    "safety stock"],
+  ["avg",  "#7A7A72", "dot",     "avg inventory"],
+  ["peak", "#5A3AB7", "dashdot", "order-up-to (est)"],
+  ["min",  "#B9C0C7", "dot",     "min inventory"],
+];
+const ORDER_CFG = {
+  placed:     { key: "pl", label: "placed orders",     color: COLORS.magenta, fill: "rgba(232,123,164,0.18)" },
+  dispatched: { key: "dp", label: "dispatched orders", color: COLORS.violet,  fill: "rgba(74,58,167,0.18)" },
+};
+let dodRenderGen = 0; // guards against a slow/stale render clobbering a newer one
 
 // ---------- state ----------
 let INDEX = null;         // {anchor,nshards,cols,rows}
@@ -503,61 +540,98 @@ function renderVariation() {
   renderRoceBreakdown(v);
 }
 
-function computeRestocks(offsets, inv, drr) {
-  const thr = Math.max(5, 2*(drr||0));
-  const restocks = [];
-  for (let i=1;i<inv.length;i++) {
-    const delta = inv[i] - inv[i-1];
-    const localThr = Math.max(thr, 0.1*inv[i-1]);
-    if (delta >= localThr) restocks.push(i);
-  }
-  return restocks;
-}
-
-function renderDodChart(v) {
+async function renderDodChart(v) {
+  const myGen = ++dodRenderGen;
   const wrap = document.getElementById("chartWrap");
-  wrap.innerHTML = "";
+  wrap.innerHTML = `<div class="empty-state">loading chart…</div>`;
   const offsets = csvNums(v.of);
   const inv = csvNums(v.iv);
   if (!offsets.length) { wrap.innerHTML = `<div class="empty-state">No series data for this variation.</div>`; return; }
-  const restocks = computeRestocks(offsets, inv, v.drr);
-  const refLines = [];
-  if (v.saf) refLines.push({y: v.saf, color: "var(--red)", label: "safety stock"});
-  if (v.saf && v.cyc) refLines.push({y: v.saf + v.cyc, color: "var(--orange)", label: "safety+cycle"});
 
-  let barSeries = null;
-  if (orderOverlay === "placed") {
-    barSeries = {label: "placed orders", color: COLORS.magenta, values: csvNums(v.pl)};
-  } else if (orderOverlay === "dispatched") {
-    barSeries = {label: "dispatched orders", color: COLORS.violet, values: csvNums(v.dp)};
+  const ready = await window.__plotlyReady;
+  if (myGen !== dodRenderGen) return; // a newer render started while we were waiting
+  if (!ready || typeof Plotly === "undefined") {
+    wrap.innerHTML = `<div class="empty-state">Chart library failed to load from any CDN (offline, or CDN blocked by network policy). Try refreshing.</div>`;
+    return;
   }
 
-  const svg = buildLineChart({
-    width: 900, height: 300,
-    x: offsets, y: inv,
-    lineColor: COLORS.blue,
-    refLines,
-    markerIdx: restocks,
-    markerColor: COLORS.orange,
-    yLabel: "live inventory",
-    barSeries,
-    tooltipLabel: (i) => {
-      const parts = [`day ${offsets[i]}`, `inv ${fmtInt(inv[i])}`];
-      if (barSeries) parts.push(`${barSeries.label} ${fmtInt(barSeries.values[i]||0)}`);
-      return parts.join(" · ");
-    },
+  const dates = offsets.map(o => new Date(ANCHOR_MS + o*86400000).toISOString().slice(0,10));
+  const delta = inv.map((val,i) => i===0 ? null : val - inv[i-1]);
+
+  // restock heuristic — same as the PID-level sibling site: day-over-day jump ≥
+  // max(5, 2×DRR, 10% of that day's post-jump inventory). Not a logged restock event.
+  const rx = [], ry = [];
+  for (let i=1;i<inv.length;i++) {
+    const thr = Math.max(5, 2*(v.drr||0), 0.1*inv[i]);
+    if (delta[i] >= thr) { rx.push(dates[i]); ry.push(inv[i]); }
+  }
+
+  const traces = [{
+    x: dates, y: inv, mode: "lines+markers", name: "live inventory",
+    line: {color: "#0F6E56", width: 1.8}, marker: {size: 3},
+    customdata: delta,
+    hovertemplate: "%{x}<br>inventory %{y:,.0f}<br>day delta %{customdata:+,.0f}<extra></extra>",
+  }];
+
+  const r = { saf: v.saf, cyc: v.cyc, avg: v.avg, min: v.min };
+  const peak = (r.saf!=null && r.cyc!=null) ? r.saf + 2*r.cyc : null;
+  const levelVals = { saf: r.saf, avg: r.avg, peak, min: r.min };
+  const shapes = [];
+  if (r.saf != null) {
+    shapes.push({type:"rect", xref:"paper", x0:0, x1:1, yref:"y", y0:0, y1:r.saf,
+      fillcolor:"#3B8BD4", opacity:0.06, line:{width:0}, layer:"below"});
+    if (peak != null) shapes.push({type:"rect", xref:"paper", x0:0, x1:1, yref:"y", y0:r.saf, y1:peak,
+      fillcolor:"#EF9F27", opacity:0.08, line:{width:0}, layer:"below"});
+  }
+  LEVELS.forEach(([key, color, dash, label]) => {
+    const val = levelVals[key];
+    if (val == null) return;
+    traces.push({
+      x: [dates[0], dates[dates.length-1]], y: [val, val], mode: "lines", name: label,
+      line: {color, dash, width: 1.2},
+      hovertemplate: label + " %{y:,.0f}<extra></extra>",
+    });
   });
-  wrap.appendChild(svg);
 
-  let foot =
-    `<span style="color:${COLORS.blue}">&#9679;</span> live inventory (left axis) &nbsp; ` +
-    (v.saf ? `<span style="color:${COLORS.red}">- - -</span> safety stock (${fmtInt(v.saf)}) &nbsp; `:"") +
-    (v.saf && v.cyc ? `<span style="color:${COLORS.orange}">- - -</span> safety+cycle (${fmtInt(v.saf+v.cyc)}) &nbsp; `:"") +
-    `<span style="color:${COLORS.orange}">&#9679;</span> restock (${restocks.length} detected, threshold = max(5, 2×DRR, 10% of prior-day inventory) — a heuristic, not a logged event)`;
-  if (barSeries) {
-    foot += ` &nbsp; <span style="color:${barSeries.color}">&#9632;</span> ${barSeries.label} (right axis)`;
+  if (rx.length) {
+    traces.push({x: rx, y: ry, mode: "markers", name: "restock",
+      marker: {color: "#5A3AB7", size: 9, symbol: "diamond"},
+      hovertemplate: "%{x}<br>restock<extra></extra>"});
   }
-  document.getElementById("chartFoot").innerHTML = foot;
+
+  let hasOrders = false;
+  if (orderOverlay !== "none" && ORDER_CFG[orderOverlay]) {
+    const cfg = ORDER_CFG[orderOverlay];
+    const ov = csvNums(v[cfg.key]);
+    if (ov.length === dates.length) {
+      hasOrders = true;
+      traces.push({x: dates, y: ov, mode: "lines", name: cfg.label, yaxis: "y2",
+        line: {color: cfg.color, width: 1.4}, fill: "tozeroy", fillcolor: cfg.fill,
+        hovertemplate: "%{x}<br>" + cfg.label + " %{y:,.0f}<extra></extra>"});
+    }
+  }
+
+  const layout = {
+    height: 420,
+    margin: {l:60, r: hasOrders?62:24, t:16, b:40},
+    font: {size:11, family:"system-ui, -apple-system, Segoe UI, sans-serif"},
+    xaxis: {gridcolor:"#F0F0EC"},
+    yaxis: {title:{text:"live inventory", font:{size:11}}, gridcolor:"#EFEFEF", zeroline:false, tickformat:",", nticks:6},
+    yaxis2: {overlaying:"y", side:"right", visible:hasOrders, showgrid:false, zeroline:false,
+      rangemode:"tozero", tickformat:",",
+      title: {text: hasOrders ? ORDER_CFG[orderOverlay].label + " / day" : "", font:{size:11, color: hasOrders?ORDER_CFG[orderOverlay].color:"#333"}},
+      tickfont: {color: hasOrders?ORDER_CFG[orderOverlay].color:"#333"}},
+    legend: {orientation:"h", y:1.16, x:0, xanchor:"left", bgcolor:"rgba(255,255,255,0.6)"},
+    paper_bgcolor: "#fcfcfb", plot_bgcolor: "#fcfcfb",
+    shapes,
+  };
+
+  wrap.innerHTML = "";
+  Plotly.newPlot(wrap, traces, layout, {responsive:true, displaylogo:false, modeBarButtonsToRemove:["lasso2d","select2d"]});
+
+  let foot = `Restock markers: day-over-day jump ≥ max(5, 2×DRR, 10% of that day's inventory) — a heuristic, not a logged event (${rx.length} detected). Drag to zoom, double-click to reset, scroll to zoom on the plot.`;
+  if (hasOrders) foot += ` ${ORDER_CFG[orderOverlay].label} shown on the right axis.`;
+  document.getElementById("chartFoot").textContent = foot;
 }
 
 function renderRoceBreakdown(v) {
