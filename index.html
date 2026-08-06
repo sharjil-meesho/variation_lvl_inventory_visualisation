@@ -105,9 +105,16 @@
     background: var(--page); border: 1px solid var(--border);
     padding: 3px 8px; border-radius: 999px; margin-left: auto;
   }
-  .orders-toggle-row { display:flex; gap: 18px; margin: 14px 0 6px; }
-  .orders-toggle-row .chk { display:flex; align-items:center; gap:6px; font-size: 12.5px; color: var(--text-secondary); margin:0; cursor:pointer; }
-  .orders-toggle-row input[type=checkbox] { margin:0; cursor:pointer; }
+  .orders-toggle-row { display:flex; align-items:center; gap: 12px; margin: 2px 0 12px; }
+  .orders-toggle-row .otr-label { font-size: 12px; color: var(--text-secondary); }
+  .toggle-group { display:flex; gap:6px; }
+  .toggle-btn {
+    font-size: 12px; padding: 5px 12px; border-radius: 999px; font-family: inherit;
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    cursor: pointer;
+  }
+  .toggle-btn:hover { background: var(--page); }
+  .toggle-btn.active { background: var(--text-primary); color: #fff; border-color: var(--text-primary); }
 
   .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin: 10px 0 14px; }
   .grid3 h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: 0 0 8px; font-weight:700;}
@@ -188,16 +195,18 @@
         <select id="varSelect"></select>
         <span class="spri-tag" id="spriTag"></span>
       </div>
+      <div class="orders-toggle-row" id="ordersToggleRow" style="display:none">
+        <span class="otr-label">Overlay orders (DoD)</span>
+        <div class="toggle-group" id="orderToggleGroup">
+          <button type="button" class="toggle-btn active" data-val="none">None</button>
+          <button type="button" class="toggle-btn" data-val="placed">Placed orders</button>
+          <button type="button" class="toggle-btn" data-val="dispatched">Dispatched orders</button>
+        </div>
+      </div>
       <div class="chart-wrap" id="chartWrap">
         <div class="empty-state">Look up a PID × SID, or pick one from the browse list, to see its chart.</div>
       </div>
       <div class="foot-note" id="chartFoot"></div>
-
-      <div class="orders-toggle-row" id="ordersToggleRow" style="display:none">
-        <label class="chk"><input type="checkbox" id="toggleDispatched" /> Dispatched orders</label>
-        <label class="chk"><input type="checkbox" id="togglePlaced" /> Placed orders</label>
-      </div>
-      <div class="chart-wrap" id="ordersChartWrap"></div>
     </div>
 
     <div class="card" id="roceCard" style="display:none">
@@ -278,6 +287,15 @@ const deadCache = new Map();
 let currentCombo = null;   // {p,s}
 let currentRec = null;     // shard record {p,s,dv,vars:[...]}
 let currentVarId = null;
+let orderOverlay = "none"; // "none" | "placed" | "dispatched" — which order series to overlay on the DoD chart
+
+document.querySelectorAll("#orderToggleGroup .toggle-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    orderOverlay = btn.dataset.val;
+    document.querySelectorAll("#orderToggleGroup .toggle-btn").forEach(b => b.classList.toggle("active", b === btn));
+    if (currentRec) renderVariation();
+  });
+});
 
 // ---------- utils ----------
 function fmt(n, d=1) {
@@ -465,10 +483,7 @@ async function selectCombo(p, s) {
   document.getElementById("chartSub").textContent = `${rec.vars.length} qualifying variation${rec.vars.length===1?"":"s"}`;
   document.getElementById("spriTag").textContent = rec.spri ? `Supplier priority ${rec.spri}` : "";
 
-  const toggleRow = document.getElementById("ordersToggleRow");
-  toggleRow.style.display = "flex";
-  document.getElementById("toggleDispatched").onchange = renderVariation;
-  document.getElementById("togglePlaced").onchange = renderVariation;
+  document.getElementById("ordersToggleRow").style.display = "flex";
 
   renderVariation();
 
@@ -486,7 +501,6 @@ function renderVariation() {
   const v = findVar(currentVarId);
   renderDodChart(v);
   renderRoceBreakdown(v);
-  renderOrdersChart(v);
 }
 
 function computeRestocks(offsets, inv, drr) {
@@ -511,6 +525,13 @@ function renderDodChart(v) {
   if (v.saf) refLines.push({y: v.saf, color: "var(--red)", label: "safety stock"});
   if (v.saf && v.cyc) refLines.push({y: v.saf + v.cyc, color: "var(--orange)", label: "safety+cycle"});
 
+  let barSeries = null;
+  if (orderOverlay === "placed") {
+    barSeries = {label: "placed orders", color: COLORS.magenta, values: csvNums(v.pl)};
+  } else if (orderOverlay === "dispatched") {
+    barSeries = {label: "dispatched orders", color: COLORS.violet, values: csvNums(v.dp)};
+  }
+
   const svg = buildLineChart({
     width: 900, height: 300,
     x: offsets, y: inv,
@@ -519,48 +540,24 @@ function renderDodChart(v) {
     markerIdx: restocks,
     markerColor: COLORS.orange,
     yLabel: "live inventory",
-    tooltipLabel: (i) => `day ${offsets[i]} · inv ${fmtInt(inv[i])}`,
-  });
-  wrap.appendChild(svg);
-
-  document.getElementById("chartFoot").innerHTML =
-    `<span style="color:${COLORS.blue}">&#9679;</span> live inventory &nbsp; ` +
-    (v.saf ? `<span style="color:${COLORS.red}">- - -</span> safety stock (${fmtInt(v.saf)}) &nbsp; `:"") +
-    (v.saf && v.cyc ? `<span style="color:${COLORS.orange}">- - -</span> safety+cycle (${fmtInt(v.saf+v.cyc)}) &nbsp; `:"") +
-    `<span style="color:${COLORS.orange}">&#9679;</span> restock (${restocks.length} detected, threshold = max(5, 2×DRR, 10% of prior-day inventory) — a heuristic, not a logged event)`;
-}
-
-function renderOrdersChart(v) {
-  const wrap = document.getElementById("ordersChartWrap");
-  wrap.innerHTML = "";
-  const showDispatched = document.getElementById("toggleDispatched").checked;
-  const showPlaced = document.getElementById("togglePlaced").checked;
-  if (!showDispatched && !showPlaced) return;
-
-  const offsets = csvNums(v.of);
-  const dispatched = csvNums(v.dp);
-  const placed = csvNums(v.pl);
-  if (!offsets.length) { wrap.innerHTML = `<div class="empty-state">No order series for this variation.</div>`; return; }
-
-  const series = [];
-  if (showDispatched) series.push({label: "dispatched orders", color: COLORS.violet, values: dispatched});
-  if (showPlaced) series.push({label: "placed orders", color: COLORS.magenta, values: placed});
-
-  const svg = buildBarChart({
-    width: 900, height: 180,
-    x: offsets, series,
+    barSeries,
     tooltipLabel: (i) => {
-      const parts = [`day ${offsets[i]}`];
-      if (showDispatched) parts.push(`dispatched ${fmtInt(dispatched[i])}`);
-      if (showPlaced) parts.push(`placed ${fmtInt(placed[i])}`);
+      const parts = [`day ${offsets[i]}`, `inv ${fmtInt(inv[i])}`];
+      if (barSeries) parts.push(`${barSeries.label} ${fmtInt(barSeries.values[i]||0)}`);
       return parts.join(" · ");
     },
   });
   wrap.appendChild(svg);
 
-  const legendBits = series.map(s => `<span style="color:${s.color}">&#9632;</span> ${s.label}`);
-  const foot = el("div", {class:"foot-note", style:"margin-top:6px", html: legendBits.join(" &nbsp; ")});
-  wrap.appendChild(foot);
+  let foot =
+    `<span style="color:${COLORS.blue}">&#9679;</span> live inventory (left axis) &nbsp; ` +
+    (v.saf ? `<span style="color:${COLORS.red}">- - -</span> safety stock (${fmtInt(v.saf)}) &nbsp; `:"") +
+    (v.saf && v.cyc ? `<span style="color:${COLORS.orange}">- - -</span> safety+cycle (${fmtInt(v.saf+v.cyc)}) &nbsp; `:"") +
+    `<span style="color:${COLORS.orange}">&#9679;</span> restock (${restocks.length} detected, threshold = max(5, 2×DRR, 10% of prior-day inventory) — a heuristic, not a logged event)`;
+  if (barSeries) {
+    foot += ` &nbsp; <span style="color:${barSeries.color}">&#9632;</span> ${barSeries.label} (right axis)`;
+  }
+  document.getElementById("chartFoot").innerHTML = foot;
 }
 
 function renderRoceBreakdown(v) {
@@ -676,14 +673,20 @@ function paintDeadChart(arr, i) {
 
 // ---------- generic SVG line chart ----------
 function buildLineChart(opts) {
-  const { width, height, x, y, lineColor, refLines=[], markerIdx=[], tooltipLabel } = opts;
-  const padL = 50, padR = 16, padT = 16, padB = 28;
+  const { width, height, x, y, lineColor, refLines=[], markerIdx=[], tooltipLabel, barSeries=null } = opts;
+  const padL = 50, padR = barSeries ? 54 : 16, padT = 16, padB = 28;
   const plotW = width - padL - padR, plotH = height - padT - padB;
   const xMin = Math.min(...x), xMax = Math.max(...x);
   const yMax = Math.max(...y, ...refLines.map(r=>r.y||0)) * 1.08 || 1;
   const yMin = 0;
   const xScale = (v) => padL + (xMax===xMin ? 0 : (v-xMin)/(xMax-xMin)) * plotW;
   const yScale = (v) => padT + plotH - ((v-yMin)/(yMax-yMin||1)) * plotH;
+
+  let y2Max = 1, y2Scale = null;
+  if (barSeries) {
+    y2Max = Math.max(...barSeries.values, 1) * 1.25;
+    y2Scale = (v) => padT + plotH - (v/y2Max) * plotH;
+  }
 
   const svgns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(svgns, "svg");
@@ -720,6 +723,39 @@ function buildLineChart(opts) {
     lbl.textContent = "day " + Math.round(val);
     svg.appendChild(lbl);
   });
+
+  // secondary-axis bar overlay (dispatched/placed orders), drawn under the line + ref lines
+  if (barSeries) {
+    const n = x.length;
+    const slotW = plotW / n;
+    const barW = Math.max(1, slotW * 0.6);
+    barSeries.values.forEach((val, i) => {
+      if (!val) return;
+      const bx = xScale(x[i]) - barW/2;
+      const by = y2Scale(val);
+      const rect = document.createElementNS(svgns, "rect");
+      rect.setAttribute("x", bx.toFixed(1));
+      rect.setAttribute("y", by.toFixed(1));
+      rect.setAttribute("width", barW.toFixed(1));
+      rect.setAttribute("height", (padT+plotH-by).toFixed(1));
+      rect.setAttribute("fill", barSeries.color);
+      rect.setAttribute("opacity", "0.5");
+      rect.setAttribute("rx", "1");
+      svg.appendChild(rect);
+    });
+    // right-axis ticks, colored to match the bar series (identifies which axis is which)
+    const ticks2 = 3;
+    for (let i=0;i<=ticks2;i++) {
+      const val = y2Max*i/ticks2;
+      const yy = y2Scale(val);
+      const lbl = document.createElementNS(svgns, "text");
+      lbl.setAttribute("x", width-padR+8); lbl.setAttribute("y", yy+4);
+      lbl.setAttribute("text-anchor","start"); lbl.setAttribute("font-size","10.5");
+      lbl.setAttribute("fill", barSeries.color);
+      lbl.textContent = fmtInt(val);
+      svg.appendChild(lbl);
+    }
+  }
 
   // reference lines
   refLines.forEach(r => {
@@ -784,98 +820,6 @@ function buildLineChart(opts) {
       tip.textContent = tooltipLabel(closest);
     });
     hitRect.addEventListener("mouseleave", () => { tip.style.opacity="0"; cursorLine.style.display="none"; });
-    wrapDiv.appendChild(svg);
-    wrapDiv.appendChild(tip);
-    return wrapDiv;
-  }
-
-  return svg;
-}
-
-// ---------- generic SVG grouped bar chart (dispatched / placed orders) ----------
-function buildBarChart(opts) {
-  const { width, height, x, series, tooltipLabel } = opts;
-  const padL = 50, padR = 16, padT = 10, padB = 24;
-  const plotW = width - padL - padR, plotH = height - padT - padB;
-  const n = x.length;
-  const allVals = series.flatMap(s => s.values);
-  const yMax = Math.max(...allVals, 1) * 1.15;
-  const slotW = plotW / n;
-  const barGap = 2;
-  const barW = Math.max(1, (slotW - barGap) / series.length);
-  const yScale = (v) => padT + plotH - (v/yMax) * plotH;
-
-  const svgns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(svgns, "svg");
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("width", "100%");
-  svg.setAttribute("height", height);
-  svg.style.display = "block";
-
-  // y gridlines
-  const ticks = 3;
-  for (let i=0;i<=ticks;i++) {
-    const val = yMax*i/ticks;
-    const yy = yScale(val);
-    const gl = document.createElementNS(svgns, "line");
-    gl.setAttribute("x1", padL); gl.setAttribute("x2", width-padR);
-    gl.setAttribute("y1", yy); gl.setAttribute("y2", yy);
-    gl.setAttribute("stroke", "var(--grid)"); gl.setAttribute("stroke-width", "1");
-    svg.appendChild(gl);
-    const lbl = document.createElementNS(svgns, "text");
-    lbl.setAttribute("x", padL-8); lbl.setAttribute("y", yy+4);
-    lbl.setAttribute("text-anchor","end"); lbl.setAttribute("font-size","10.5");
-    lbl.setAttribute("fill","var(--text-muted)");
-    lbl.textContent = fmtInt(val);
-    svg.appendChild(lbl);
-  }
-  [0, 0.5, 1].forEach(f => {
-    const i = Math.round((n-1)*f);
-    const xx = padL + i*slotW + slotW/2;
-    const lbl = document.createElementNS(svgns, "text");
-    lbl.setAttribute("x", xx); lbl.setAttribute("y", height-6);
-    lbl.setAttribute("text-anchor", f===0?"start":f===1?"end":"middle");
-    lbl.setAttribute("font-size","10.5"); lbl.setAttribute("fill","var(--text-muted)");
-    lbl.textContent = "day " + x[i];
-    svg.appendChild(lbl);
-  });
-
-  for (let i=0;i<n;i++) {
-    series.forEach((s, si) => {
-      const v = s.values[i] || 0;
-      if (v <= 0) return;
-      const bx = padL + i*slotW + si*(barW+barGap);
-      const by = yScale(v);
-      const rect = document.createElementNS(svgns, "rect");
-      rect.setAttribute("x", bx.toFixed(1));
-      rect.setAttribute("y", by.toFixed(1));
-      rect.setAttribute("width", barW.toFixed(1));
-      rect.setAttribute("height", (padT+plotH-by).toFixed(1));
-      rect.setAttribute("fill", s.color);
-      rect.setAttribute("rx", "1.5");
-      svg.appendChild(rect);
-    });
-  }
-
-  if (tooltipLabel) {
-    const wrapDiv = el("div", {style:"position:relative"});
-    const tip = el("div", {class:"tooltip"});
-    const hitRect = document.createElementNS(svgns, "rect");
-    hitRect.setAttribute("x", padL); hitRect.setAttribute("y", padT);
-    hitRect.setAttribute("width", plotW); hitRect.setAttribute("height", plotH);
-    hitRect.setAttribute("fill", "transparent");
-    svg.appendChild(hitRect);
-    hitRect.addEventListener("mousemove", (e) => {
-      const rect = svg.getBoundingClientRect();
-      const relX = (e.clientX - rect.left) * (width/rect.width);
-      let i = Math.floor((relX-padL)/slotW);
-      i = Math.max(0, Math.min(n-1, i));
-      tip.style.opacity = "1";
-      tip.style.left = (rect.width * ((padL+i*slotW+slotW/2)/width)) + "px";
-      tip.style.top = (rect.height * (padT/height)) + "px";
-      tip.textContent = tooltipLabel(i);
-    });
-    hitRect.addEventListener("mouseleave", () => { tip.style.opacity="0"; });
     wrapDiv.appendChild(svg);
     wrapDiv.appendChild(tip);
     return wrapDiv;
