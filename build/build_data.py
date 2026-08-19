@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
-Build the data/ directory for the variation-level ROCE inventory explorer — 2026-08-19 refresh.
+Build the data/ directory for the variation-level ROCE inventory explorer — 2026-08-19 refresh
+(updated later the same day, "2026-08-19b", to add the Reliable Inventory Curve filter).
 
 This replaces the previous build (scrap.roce_eqn__products_classification +
 scrap.roce_eqn__inventory_logs_apr_jun_oms_w_orders, Apr-Jun window, with a Seller ROCE rollup
 panel and a Dead PID x Variations sample panel) with:
   - A new source table for all "static" per-variation metrics: scrap.roce_demand_eqn__enriched
-    (83 columns, no DRR floor — filtered instead by days_observed=90, instock_days>=45,
-    order_days>=10).
+    (86 columns as of 2026-08-19b — the user added is_unreliable_flat_inv, suspect_inv_levels,
+    and is_unreliable_inv to this table after the initial 83-column refresh; no DRR floor either
+    way — filtered instead by days_observed=90, instock_days>=45, order_days>=10).
+  - 2026-08-19b addition: a "Reliable inventory curve" browse filter (Yes/No), sourced from the
+    new is_unreliable_inv column (Yes = is_unreliable_inv=0). Same population as before — this
+    only adds a column/filter, it does not change which PID x SID x Variation rows qualify. The
+    supplemental pull for these 3 new columns was merged into roce_demand_enriched_export.json
+    by (product_id, supplier_id, variation_id) — see build/export_queries.sql.
   - A new source table for the day-on-day inventory/orders series: scrap.roce_eqn__inventory_oms_dod_final,
     read via a pre-filtered scrap table (see build/export_queries.sql for why — this table is
     5.46B+ rows unfiltered and blows Presto's distributed memory limit if joined directly).
@@ -111,6 +118,10 @@ RAW_COLS = [
     "meesho_demand_shape_tag", "overall_demand_shape_tag",
     "supplier_priority", "slp", "group_id", "pid_created",
     "biz_fin_category", "sscat", "portfolio", "super_portfolio", "is_new",
+    # Added 2026-08-19b: the user added these 3 columns to scrap.roce_demand_eqn__enriched
+    # (is_unreliable_flat_inv/suspect_inv_levels are the two component signals,
+    # is_unreliable_inv = 1 if either is 1). Table now has 86 columns, not 83.
+    "is_unreliable_flat_inv", "suspect_inv_levels", "is_unreliable_inv",
 ]
 
 
@@ -226,6 +237,7 @@ def main():
                 "nbyg": r.get("nbyg_frac"),
                 "slp": r.get("slp"),
                 "new": r.get("is_new"),
+                "unrel": r.get("is_unreliable_inv"),
                 "mdst": r.get("meesho_demand_shape_tag"),
                 "odst": r.get("overall_demand_shape_tag"),
                 "raw": [_round_raw(r.get(c)) for c in RAW_COLS],
@@ -256,6 +268,7 @@ def main():
         ext_buckets[shard_idx][key] = {"vars": ext_var_list}
 
         isnew_vals = sorted({str(r.get("is_new")) for r in vrows if r.get("is_new") is not None})
+        unrel_vals = sorted({str(r.get("is_unreliable_inv")) for r in vrows if r.get("is_unreliable_inv") is not None})
         mdst_vals = sorted({r.get("meesho_demand_shape_tag") for r in vrows if r.get("meesho_demand_shape_tag")})
         odst_vals = sorted({r.get("overall_demand_shape_tag") for r in vrows if r.get("overall_demand_shape_tag")})
 
@@ -275,6 +288,7 @@ def main():
             "nv": len(vrows),
             "dv": default_var["vid"],
             "isnew": ",".join(isnew_vals),
+            "unrel": ",".join(unrel_vals),
             "mdst": ",".join(mdst_vals),
             "odst": ",".join(odst_vals),
         })
@@ -298,7 +312,7 @@ def main():
             f.write(gzip.compress(payload, compresslevel=9))
 
     cols = ["p", "s", "sc", "pf", "sp", "bf", "spri", "drr", "mdrr", "avg", "nr", "dis", "to", "nv", "dv",
-            "isnew", "mdst", "odst"]
+            "isnew", "unrel", "mdst", "odst"]
     rows = [[r[c] for c in cols] for r in index_rows]
     index_doc = {
         "anchor": ANCHOR_MAIN,

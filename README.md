@@ -12,6 +12,14 @@ Data window: **2026-05-18 → 2026-08-15** by default (anchor `2026-05-18`, 90 d
 
 ## What changed in this refresh
 
+- **2026-08-19b addition — Reliable inventory curve filter**: the user added 3 columns to
+  `scrap.roce_demand_eqn__enriched` after the refresh below was already live —
+  `is_unreliable_flat_inv`, `suspect_inv_levels`, and `is_unreliable_inv` (1 if either of the
+  first two is 1). A new sidebar filter, **"Reliable inventory curve"** (Yes/No, Yes when
+  `is_unreliable_inv = 0`), sits directly under "Is new" — same per-variation, "any variation
+  qualifies" semantics as the existing is_new/demand-shape filters. The population is unchanged;
+  this only adds a column and a filter on it. The all-columns panel now shows 86 columns, not 83.
+  9.5% of the 284,020 variation rows are flagged `is_unreliable_inv = 1`.
 - **New source table for per-variation metrics**: `scrap.roce_demand_eqn__enriched` (83 columns),
   replacing `scrap.roce_eqn__products_classification`. Scope is now `days_observed = 90 AND
   instock_days >= 45 AND order_days >= 10` — **no DRR floor**, unlike the previous
@@ -41,11 +49,12 @@ Data window: **2026-05-18 → 2026-08-15** by default (anchor `2026-05-18`, 90 d
 ## What's on the page
 
 1. **Look up a PID × SID** or **browse & search** (sidebar) — filters on supplier priority,
-   super portfolio, portfolio, sub-category (sscat), is new, Meesho demand shape, and overall
-   demand shape; search by PID or SID substring. The three demand-shape-family filters are set
-   *per variation*, not per PID×SID (see "Scope"), so each matches a combo if **any** of its
-   variations qualify — the sidebar hint text shows the actual disagreement rate for this scope,
-   computed live from `data/index.json.gz` rather than a hardcoded figure.
+   super portfolio, portfolio, sub-category (sscat), is new, reliable inventory curve, Meesho
+   demand shape, and overall demand shape; search by PID or SID substring. The four "is
+   new"-style filters are set *per variation*, not per PID×SID (see "Scope"), so each matches a
+   combo if **any** of its variations qualify — the sidebar hint text shows the actual
+   disagreement rate for this scope, computed live from `data/index.json.gz` rather than a
+   hardcoded figure.
 2. **Day-on-day inventory** — a **Variation** dropdown appears once a PID×SID is selected
    (defaults to the variation with the most orders), alongside pills for supplier priority,
    sub-category, biz-fin category, SLP, is new, Meesho demand shape, and overall demand shape for
@@ -60,7 +69,7 @@ Data window: **2026-05-18 → 2026-08-15** by default (anchor `2026-05-18`, 90 d
    orders" is **not** a logged order event — see "Known limitations" below.
 3. **ROCE breakdown** — DIO (safety + cycle + transit) + DSO for the *selected variation only*,
    sourced from `scrap.roce_demand_eqn__enriched`.
-4. **All columns (raw)** — every one of the 83 columns in `scrap.roce_demand_eqn__enriched` for
+4. **All columns (raw)** — every one of the 86 columns in `scrap.roce_demand_eqn__enriched` for
    the *selected variation*, as a plain key/value grid, including columns shown elsewhere on the
    page — a literal "everything the table has" dump, not a curated subset. Numbers are rounded to
    4 decimal places for display only.
@@ -79,11 +88,11 @@ previous scope's combo count, since the old `meesho_drr>=1 AND total_drr>=1` fil
 earlier count query on 2026-08-18 estimated 166,398 combos / 6,399 sellers — the small difference
 from the actual pulled numbers above is unremarkable at this scale and not worth re-chasing.)
 
-`is_new` / `meesho_demand_shape_tag` / `overall_demand_shape_tag` are still set **per variation,
-not per product**; the sidebar's disagreement-rate hint is computed live from the actual data at
-page load (see `updateDisagreeHint()` in `index.html`) rather than a hardcoded percentage, since
-that rate is specific to each scope/table and would otherwise silently go stale on a refresh like
-this one.
+`is_new` / `is_unreliable_inv` / `meesho_demand_shape_tag` / `overall_demand_shape_tag` are still
+set **per variation, not per product**; the sidebar's disagreement-rate hint is computed live
+from the actual data at page load (see `updateDisagreeHint()` in `index.html`) rather than a
+hardcoded percentage, since that rate is specific to each scope/table and would otherwise
+silently go stale on a refresh like this one.
 
 `meesho_demand_shape_tag` and `overall_demand_shape_tag` each take one of 8 values: `smooth`,
 `gradual_decrease`, `gradual_increase`, `step_up`, `sudden_drop`, `up_down_bau_volatile`,
@@ -94,11 +103,11 @@ this one.
 ```
 index.html                 the app — fetches data/* over http(s), won't work from file://
 data/index.json.gz         browse/search index: one row per PID×SID (aggregated across its
-                            qualifying variations) + "rawCols" (the 83 column-name labels for
+                            qualifying variations) + "rawCols" (the 86 column-name labels for
                             each variation's "raw" array) + "anchor"/"extAnchor". Gzip-compressed
                             (unlike the previous version's plain index.json) — at this scope's
-                            ~169k combos the plain JSON is ~31MB, gzip cuts that a lot.
-data/shards/<p%256>.json.gz  per-PID×SID×Variation records + the default 90-day series + all 83
+                            ~169k combos the plain JSON is ~33MB, gzip cuts that a lot.
+data/shards/<p%256>.json.gz  per-PID×SID×Variation records + the default 90-day series + all 86
                             raw scrap-table columns, gzip-compressed
 data/ext/<p%256>.json.gz   per-PID×SID×Variation records with ONLY the full 2026-01-01 ->
                             2026-08-15 series (of/iv/pl/dp/ov) — no static fields, since those
@@ -116,8 +125,9 @@ Local check: `python3 -m http.server 8000` from this directory, then open
 Chrome/Edge/Firefox/Safari) since the shard and ext files are gzip-compressed and decoded
 client-side.
 
-**Data size**: this scope is ~4x the previous one by combo count, and now carries 83 raw columns
-per variation (vs 64 before) plus a second (lazy-loaded) series tree. Watch `data/` total size
+**Data size**: this scope is ~4x the previous one by combo count, and now carries 86 raw columns
+per variation (vs 64 before, 83 as of the initial 2026-08-19 refresh) plus a second (lazy-loaded)
+series tree. Watch `data/` total size
 before pushing — this repo previously hit an HTTP 408 on `git push` through the corporate proxy
 at ~36MB uncompressed; the *previous* refresh landed around ~55MB and needed staged commits. If
 `git push` fails: push over a direct connection if available, split `data/shards/` (and now
@@ -161,7 +171,12 @@ change it. `CUTOFF` in `build_data.py` (137 — the offset of 2026-05-18 within 
   a confirmed field-mapping decision, not an oversight; the all-columns panel below the chart
   shows `avg_drr_90d` and the other order-count DRR variants (`avg_drr_7d/15d/30d/60d`,
   `median_drr_*`, `outlier_removed_*`) alongside it for comparison.
-- **`is_new` / demand-shape tags are per variation, not per product** — the sidebar shows the
+- **"Reliable inventory curve" filter is framed inverted from its source column** — the
+  underlying column is `is_unreliable_inv` (1 = unreliable), but the filter/pill read the
+  opposite way ("Yes" = reliable = `is_unreliable_inv = 0`) because that's the more natural
+  framing for browsing. `is_unreliable_inv` itself is a heuristic (`is_unreliable_flat_inv OR
+  suspect_inv_levels`), not a certainty — see the all-columns panel for the two component flags.
+- **`is_new` / `is_unreliable_inv` / demand-shape tags are per variation, not per product** — the sidebar shows the
   live disagreement rate for this scope (see "Scope"). The pills next to the variation dropdown
   show only the *currently selected* variation's values, so a combo can pass a filter for a
   reason the visible pill doesn't show if a different variation is the one that qualifies.

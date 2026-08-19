@@ -49,10 +49,14 @@
 
 -- ============================================================================
 -- 1. roce_demand_enriched_export.json — one row per qualifying PID x SID x Variation from
---    scrap.roce_demand_eqn__enriched. 284,020 rows / 166,398 PID x SID combos / 6,399 sellers
---    (confirmed via count query 2026-08-18) — no DRR floor, no supplier restriction; scope is
---    entirely defined by this WHERE clause. All 83 columns of the table, straight SELECT (no
---    GROUP BY needed — one row per key already).
+--    scrap.roce_demand_eqn__enriched. 284,020 rows / 169,325 PID x SID combos / 6,525 sellers
+--    (actual pulled numbers, 2026-08-19) — no DRR floor, no supplier restriction; scope is
+--    entirely defined by this WHERE clause. All columns of the table, straight SELECT (no
+--    GROUP BY needed — one row per key already). Below is the original 83-column pull; as of
+--    2026-08-19b the table has 3 more columns (is_unreliable_flat_inv, suspect_inv_levels,
+--    is_unreliable_inv) — see query 3 below for how those were added without re-pulling
+--    everything. A from-scratch re-run of this query should just add those 3 columns to this
+--    SELECT list directly instead of doing a separate supplemental pull.
 --
 --    Pulled in 16 chunks (product_id % 16 = 0..15) purely to keep each Metabase response small
 --    (full unchunked pull is ~650MB of raw JSON text) — chunk, don't re-filter the population.
@@ -74,7 +78,8 @@ select
   overall_abs_shift_recent_vs_mid, overall_abs_shift_mid_vs_early, overall_daily_cv,
   meesho_demand_shape_tag, overall_demand_shape_tag,
   supplier_priority, slp, group_id, cast(pid_created as varchar) as pid_created,
-  biz_fin_category, sscat, portfolio, super_portfolio, is_new
+  biz_fin_category, sscat, portfolio, super_portfolio, is_new,
+  is_unreliable_flat_inv, suspect_inv_levels, is_unreliable_inv   -- added 2026-08-19b
 from scrap.roce_demand_eqn__enriched
 where days_observed = 90 and instock_days >= 45 and order_days >= 10
   and product_id % 16 = <k>;   -- run for k = 0..15, concatenate the 16 JSON arrays into one file
@@ -104,6 +109,28 @@ select
 from scrap.roce_demand_dod_jan_aug
 where product_id % 16 = <k>   -- run for k = 0..15, concatenate the 16 JSON arrays into one file
 group by product_id, supplier_id, variation_id;
+
+-- ============================================================================
+-- 3. ric_supplement.json (2026-08-19b) — supplemental pull, NOT part of the original refresh.
+--    The user added 3 columns to scrap.roce_demand_eqn__enriched after the initial pull above:
+--    is_unreliable_flat_inv, suspect_inv_levels, is_unreliable_inv (= 1 if either of the first two
+--    is 1). Rather than re-pulling all 83 original columns again, this is a narrow supplemental
+--    pull of just the new columns for the SAME population (same WHERE clause, same 284,020 rows),
+--    merged onto roce_demand_enriched_export.json by (product_id, supplier_id, variation_id) —
+--    see build_data.py's RAW_COLS (now 86 entries) and the "unrel" field on each variation.
+--
+--    Small enough (6 narrow columns x 284,020 rows, ~39MB raw JSON) to pull in one shot, no
+--    chunking needed (took ~8s).
+--
+--    New filter added to the site from this: "Reliable inventory curve" (Yes/No), Yes when
+--    is_unreliable_inv = 0. Same per-variation "any variation qualifies" semantics as the
+--    existing is_new / demand-shape filters.
+-- ============================================================================
+select
+  product_id, supplier_id, variation_id,
+  is_unreliable_flat_inv, suspect_inv_levels, is_unreliable_inv
+from scrap.roce_demand_eqn__enriched
+where days_observed = 90 and instock_days >= 45 and order_days >= 10;
 
 -- ============================================================================
 -- Removed from this version (confirmed with the user 2026-08-19 — dropped, not replaced):

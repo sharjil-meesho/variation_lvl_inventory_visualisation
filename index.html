@@ -208,11 +208,13 @@ window.__plotlyReady = new Promise(function(resolve){
       <select id="fSc"><option value="">All</option></select>
       <label for="fIsNew">Is new</label>
       <select id="fIsNew"><option value="">All</option></select>
+      <label for="fRic">Reliable inventory curve</label>
+      <select id="fRic"><option value="">All</option></select>
       <label for="fMdst">Meesho demand shape</label>
       <select id="fMdst"><option value="">All</option></select>
       <label for="fOdst">Overall demand shape</label>
       <select id="fOdst"><option value="">All</option></select>
-      <div class="hint" id="disagreeHint">Is new / demand-shape filters match a combo if <b>any</b> of its variations qualify — these 3 fields are set per variation, and some combos have variations that disagree.</div>
+      <div class="hint" id="disagreeHint">Is new / reliable inventory curve / demand-shape filters match a combo if <b>any</b> of its variations qualify — these 4 fields are set per variation, and some combos have variations that disagree.</div>
       <div class="match-count" id="matchCount">loading…</div>
       <div class="browse-list" id="browseList"></div>
     </div>
@@ -234,6 +236,7 @@ window.__plotlyReady = new Promise(function(resolve){
           <span class="spri-tag" id="bfTag"></span>
           <span class="spri-tag" id="slpTag"></span>
           <span class="spri-tag" id="isNewTag"></span>
+          <span class="spri-tag" id="ricTag"></span>
           <span class="spri-tag" id="mdstTag"></span>
           <span class="spri-tag" id="odstTag"></span>
         </div>
@@ -423,12 +426,13 @@ function updateDisagreeHint() {
   if (!ROWS.length) return;
   const disagree = ROWS.filter(r =>
     (r.isnew && r.isnew.includes(",")) ||
+    (r.unrel && r.unrel.includes(",")) ||
     (r.mdst && r.mdst.includes(",")) ||
     (r.odst && r.odst.includes(","))
   ).length;
   const pct = (disagree / ROWS.length * 100).toFixed(1);
   document.getElementById("disagreeHint").innerHTML =
-    `Is new / demand-shape filters match a combo if <b>any</b> of its variations qualify — these 3 fields are set per variation, and ${pct}% of combos here have variations that disagree.`;
+    `Is new / reliable inventory curve / demand-shape filters match a combo if <b>any</b> of its variations qualify — these 4 fields are set per variation, and ${pct}% of combos here have variations that disagree.`;
 }
 
 async function fetchGzipJson(url) {
@@ -473,16 +477,20 @@ function uniqueSorted(field, splitComma=false) {
 // is_new/demand-shape filters are comma-joined "any variation qualifies" fields (like the
 // "db"/dead_basis field on the sibling new_dead site) — split on comma when building options
 // and when matching, instead of comparing the whole string.
-const COMMA_FILTERS = new Set(["fIsNew", "fMdst", "fOdst"]);
+const COMMA_FILTERS = new Set(["fIsNew", "fRic", "fMdst", "fOdst"]);
 const IS_NEW_LABEL = v => v === "1" ? "Yes (new)" : v === "0" ? "No" : v;
+// "unrel" holds the raw is_unreliable_inv value (1 = unreliable) — the filter is framed the
+// opposite way ("Reliable inventory curve"), so the label inverts it: is_unreliable_inv=0 -> Yes.
+const RIC_LABEL = v => v === "0" ? "Yes" : v === "1" ? "No" : v;
 function buildFilterOptions() {
-  const map = { fSpri: "spri", fSp: "sp", fPf: "pf", fSc: "sc", fIsNew: "isnew", fMdst: "mdst", fOdst: "odst" };
+  const map = { fSpri: "spri", fSp: "sp", fPf: "pf", fSc: "sc", fIsNew: "isnew", fRic: "unrel", fMdst: "mdst", fOdst: "odst" };
   for (const selId in map) {
     const sel = document.getElementById(selId);
     const splitComma = COMMA_FILTERS.has(selId);
     uniqueSorted(map[selId], splitComma).forEach(v => {
       const o = document.createElement("option");
-      o.value = v; o.textContent = selId === "fIsNew" ? IS_NEW_LABEL(v) : v;
+      o.value = v;
+      o.textContent = selId === "fIsNew" ? IS_NEW_LABEL(v) : selId === "fRic" ? RIC_LABEL(v) : v;
       sel.appendChild(o);
     });
     sel.addEventListener("change", renderBrowseList);
@@ -499,6 +507,7 @@ function filteredRows() {
   const pf = document.getElementById("fPf").value;
   const sc = document.getElementById("fSc").value;
   const isnew = document.getElementById("fIsNew").value;
+  const ric = document.getElementById("fRic").value;
   const mdst = document.getElementById("fMdst").value;
   const odst = document.getElementById("fOdst").value;
   return ROWS.filter(r => {
@@ -509,6 +518,7 @@ function filteredRows() {
     if (pf && r.pf !== pf) return false;
     if (sc && r.sc !== sc) return false;
     if (isnew && !(r.isnew||"").split(",").includes(isnew)) return false;
+    if (ric && !(r.unrel||"").split(",").includes(ric)) return false;
     if (mdst && !(r.mdst||"").split(",").includes(mdst)) return false;
     if (odst && !(r.odst||"").split(",").includes(odst)) return false;
     return true;
@@ -621,6 +631,7 @@ function renderVariation() {
   const v = findVar(currentVarId);
   document.getElementById("slpTag").textContent = v.slp != null ? `SLP ${fmtInt(v.slp)}` : "";
   document.getElementById("isNewTag").textContent = v.new != null ? (String(v.new) === "1" ? "New" : "Not new") : "";
+  document.getElementById("ricTag").textContent = v.unrel != null ? (String(v.unrel) === "1" ? "Unreliable inv. curve" : "Reliable inv. curve") : "";
   document.getElementById("mdstTag").textContent = v.mdst ? `Meesho shape: ${v.mdst}` : "";
   document.getElementById("odstTag").textContent = v.odst ? `Overall shape: ${v.odst}` : "";
   renderDodChart(v);
