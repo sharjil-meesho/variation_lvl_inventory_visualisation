@@ -1,93 +1,116 @@
 #!/usr/bin/env python3
 """
-Build the data/ directory for the variation-level ROCE inventory explorer.
+Build the data/ directory for the variation-level ROCE inventory explorer — 2026-08-19 refresh.
 
-Inputs (raw Metabase JSON exports, produced via the packed array_agg queries):
-  var_lvl_main_export.json   - 72,397 rows: one per qualifying PID x SID x Variation
-                                (meesho_drr>=1 AND total_drr>=1), each with a packed
-                                day-on-day series (offsets/inv/dispatched/ordered/overall as
-                                CSV strings — "overall" = inventory-drop-derived order count,
-                                added 2026-08-08, sign already flipped positive in the SQL),
-                                PLUS (2026-08-13) all 64 columns from
-                                scrap.roce_eqn__products_classification — see RAW_COLS below.
-  var_lvl_dead_export.json   - 109,460 rows: deterministic 10-per-seller dead PID x Variation
-                                sample (is_dead=1, avg_inventory>0, days_in_stock>=5), each with
-                                a packed live-inventory series. Source table swapped 2026-08-13
-                                to scrap.roce_eqn__products_classification (confirmed identical
-                                population to the old table under the same filter).
-  var_lvl_rollup_export.json - 7,937 rows: seller-level ROCE rollup (2 variants: overall,
-                                reliable_w_restock_filter).
+This replaces the previous build (scrap.roce_eqn__products_classification +
+scrap.roce_eqn__inventory_logs_apr_jun_oms_w_orders, Apr-Jun window, with a Seller ROCE rollup
+panel and a Dead PID x Variations sample panel) with:
+  - A new source table for all "static" per-variation metrics: scrap.roce_demand_eqn__enriched
+    (83 columns, no DRR floor — filtered instead by days_observed=90, instock_days>=45,
+    order_days>=10).
+  - A new source table for the day-on-day inventory/orders series: scrap.roce_eqn__inventory_oms_dod_final,
+    read via a pre-filtered scrap table (see build/export_queries.sql for why — this table is
+    5.46B+ rows unfiltered and blows Presto's distributed memory limit if joined directly).
+  - Two view ranges instead of one: a default 90-day window (2026-05-18 -> 2026-08-15, same
+    anchor semantics as before) PLUS a lazy-loaded expanded range (2026-01-01 -> 2026-08-15) for
+    the new "expand" control in index.html. Both are sliced from the SAME pulled series (anchored
+    at 2026-01-01), not pulled twice.
+  - The Seller ROCE rollup panel and the Dead PID x Variations panel are DROPPED entirely (no
+    replacement, no approximation) — confirmed with the user 2026-08-19. There is accordingly no
+    sid_roce.json and no data/dead/ output anymore.
+
+Inputs (raw Metabase JSON exports — see build/export_queries.sql):
+  roce_demand_enriched_export.json - one row per qualifying PID x SID x Variation from
+                                      scrap.roce_demand_eqn__enriched (days_observed=90,
+                                      instock_days>=45, order_days>=10). All 83 columns of that
+                                      table, no aggregation needed (already one row per key).
+  roce_demand_dod_export.json      - one row per qualifying PID x SID x Variation, with 5 packed
+                                      day-on-day series (offsets/inv/dispatched/ordered/overall as
+                                      CSV strings) covering 2026-01-01 through 2026-08-15 (227
+                                      days), anchored at 2026-01-01. Pulled from the pre-filtered
+                                      scrap table scrap.roce_demand_dod_jan_aug, not the raw
+                                      5.46B-row fact table directly.
 
 Outputs (written under OUT_DIR):
-  data/index.json               - browse/search index, one row per PID x SID (aggregated across
-                                   its qualifying variations), plus "rawCols" (the 64 column
-                                   names, in order, that each variation's "raw" array maps to —
-                                   stored once here instead of repeated per shard record).
-                                   Plain JSON, fetched once at load.
+  data/index.json                - browse/search index, one row per PID x SID (aggregated across
+                                    its qualifying variations), plus "rawCols" (the 83 column
+                                    names, in order, that each variation's "raw" array maps to).
+                                    Plain JSON, fetched once at load.
   data/shards/<p % NSHARDS>.json.gz
-                                 - map "<pid>_<sid>" -> {p, s, dv, vars:[...]}, one entry per
-                                   variation. Gzip-compressed; index.html decodes with
-                                   DecompressionStream on fetch.
-  data/sid_roce.json            - map "<sid>" -> [10 values] (2 ROCE variants x 5 fields each).
-                                   Plain JSON, fetched once at load.
-  data/dead/<s % NDEAD>.json.gz - map "<sid>" -> [ [pid, vid, vn, sscat, avg, dis, nr, drr, of, iv], ... ]
-                                  Gzip-compressed.
+                                  - map "<pid>_<sid>" -> {p, s, spri, dv, vars:[...]}, one entry
+                                    per variation, DEFAULT 90-day series only (2026-05-18 ->
+                                    2026-08-15). Gzip-compressed; index.html decodes with
+                                    DecompressionStream on fetch. Fetched for every combo shown.
+  data/ext/<p % NSHARDS>.json.gz
+                                  - map "<pid>_<sid>" -> {vars:[{vid, of, iv, pl, dp, ov}]} — the
+                                    FULL 2026-01-01 -> 2026-08-15 series for the same combos, with
+                                    no other fields (everything else is static and already in the
+                                    main shard). Gzip-compressed. Fetched ONLY when the user clicks
+                                    "expand" on a given combo's chart — this is what keeps the
+                                    default page weight down at this ~4x-larger scope.
 
-NSHARDS / NDEAD must match the constants read by index.html.
+NSHARDS must match the constant read by index.html. NDEAD is gone (no dead panel).
 
-2026-08-13 update — table swap + 3 new filters/tags + "all columns" panel:
-  Base table for the main export swapped from scrap.roce_eqn__var_lvl_calcs_kri_enriched to
-  scrap.roce_eqn__products_classification (confirmed identical population under the same
-  meesho_drr>=1 & total_drr>=1 filter — 72,397 rows / 50,113 combos, unchanged). The new table
-  adds is_new, meesho_demand_shape_tag, overall_demand_shape_tag (now used as sidebar filters,
-  set per variation like "slp" is) plus ~28 supporting demand-shape diagnostic columns. All 64
-  columns are passed through per variation as a compact positional "raw" array (see RAW_COLS)
-  for the new "all columns" panel in index.html, positioned between the SKU-level ROCE
-  breakdown and the seller-level ROCE panel.
-
-  is_new/meesho_demand_shape_tag/overall_demand_shape_tag are set PER VARIATION, not per
-  product — 5,305 of 50,113 combos (~10.6%) have variations that disagree on at least one of
-  the three. Per user confirmation (2026-08-13), the sidebar filters use "matches if ANY
-  variation qualifies" logic — same pattern as the "db" (dead_basis) filter field on the
-  sibling roce_inventory_var_lvl_new_dead site. See the "isnew"/"mdst"/"odst" index_rows
-  fields below (comma-joined unique values per combo).
+Field-mapping notes (confirmed with the user 2026-08-18/19, since the new table doesn't use the
+same column names as the old scrap.roce_eqn__products_classification):
+  - "drr" (used for the restock heuristic threshold and browse-list DRR display) now sources from
+    inventory_drr, not total_drr (that column doesn't exist in the new table).
+  - "mdrr" (secondary/context DRR, not directly plotted) now sources from avg_drr_90d, not
+    meesho_drr.
+  - "dis" (days in stock, index-only, not directly rendered) now sources from instock_days, not
+    days_in_stock (renamed in the new table).
+  - is_new / meesho_demand_shape_tag / overall_demand_shape_tag / supplier_priority / slp /
+    group_id / pid_created / biz_fin_category / sscat / portfolio / super_portfolio / total_orders
+    / safety_stock / cycle_stock / restock_interval / dio_* / dso / odnr_frac / nbyg_frac /
+    avg_inventory / min_inventory / inv_std / n_restocks — all unchanged column names, carried
+    over as-is.
 """
 import gzip
 import json
 import os
 import sys
+from datetime import date
 
 IN_DIR = sys.argv[1] if len(sys.argv) > 1 else "."
 OUT_DIR = sys.argv[2] if len(sys.argv) > 2 else "."
 
 NSHARDS = 256
-NDEAD = 64
 
-ANCHOR = "2026-04-01"
+ANCHOR_MAIN = "2026-05-18"   # default 90-day view: 2026-05-18 -> 2026-08-15
+ANCHOR_EXT = "2026-01-01"    # expanded view: 2026-01-01 -> 2026-08-15
 
-# All 64 columns of scrap.roce_eqn__products_classification, in the table's natural (describe)
-# order — confirmed via `describe scrap.roce_eqn__products_classification` on 2026-08-13. Each
-# variation's "raw" array (below) holds one value per entry here, in this exact order; index.json
-# carries this list once (as "rawCols") so index.html can label the values without repeating
-# 64 keys per variation record.
+# offsets in the pulled series are relative to ANCHOR_EXT (2026-01-01); this is the offset value
+# of ANCHOR_MAIN (2026-05-18) within that series — entries at/after this offset are the "main"
+# 90-day slice, re-based to 0 for the main shard.
+CUTOFF = (date(2026, 5, 18) - date(2026, 1, 1)).days  # 137
+
+# All 83 columns of scrap.roce_demand_eqn__enriched, in the table's natural (describe) order,
+# confirmed via `describe scrap.roce_demand_eqn__enriched` on 2026-08-19. Each variation's "raw"
+# array (below) holds one value per entry here, in this exact order; index.json carries this list
+# once (as "rawCols") so index.html can label the values without repeating 83 keys per variation.
 RAW_COLS = [
     "product_id", "supplier_id", "variation_id", "variation",
-    "biz_fin_category", "sscat", "portfolio", "super_portfolio",
-    "total_drr", "meesho_drr", "days_observed", "days_in_stock", "avg_inventory",
-    "min_inventory", "inv_std", "n_restocks", "safety_stock", "cycle_stock",
-    "restock_interval", "dio_safety", "dio_cycle", "dio_transit", "dio_pipeline",
-    "total_orders", "is_dead", "dso", "odnr_frac", "nbyg_frac", "supplier_priority",
-    "slp", "group_id", "pid_created", "category_group", "first_order_date", "span_days",
-    "is_new", "max_daily_orders", "active_window_days", "zero_days",
+    "days_observed", "instock_days", "oos_days", "order_days",
+    "avg_drr_7d", "median_drr_7d", "avg_drr_15d", "median_drr_15d", "avg_drr_30d", "median_drr_30d",
+    "stddev_drr_30d", "avg_drr_60d", "median_drr_60d", "stddev_drr_60d", "avg_drr_90d",
+    "median_drr_90d", "stddev_drr_90d",
+    "total_orders_90d", "total_transit_stock", "odnr_perc", "inventory_drr", "meesho_drr_inv",
+    "outlier_removed_inventory_drr", "outlier_removed_meesho_drr_inv",
+    "avg_inventory", "min_inventory", "inv_std", "n_restocks", "safety_stock", "cycle_stock",
+    "restock_interval", "dio_safety", "dio_cycle", "dio_transit", "dio_pipeline", "total_orders",
+    "is_dead", "dso", "odnr_frac", "nbyg_frac",
+    "first_order_date", "span_days", "max_daily_orders", "active_window_days", "zero_days",
     "early_mean", "mid_mean", "recent_mean", "early_stddev", "mid_stddev",
-    "z_shift_recent_vs_mid", "z_shift_mid_vs_early",
-    "abs_shift_recent_vs_mid", "abs_shift_mid_vs_early", "daily_cv",
+    "z_shift_recent_vs_mid", "z_shift_mid_vs_early", "abs_shift_recent_vs_mid",
+    "abs_shift_mid_vs_early", "daily_cv",
     "overall_total_orders", "overall_max_daily_orders", "overall_zero_days",
     "overall_early_mean", "overall_mid_mean", "overall_recent_mean",
     "overall_early_stddev", "overall_mid_stddev",
     "overall_z_shift_recent_vs_mid", "overall_z_shift_mid_vs_early",
     "overall_abs_shift_recent_vs_mid", "overall_abs_shift_mid_vs_early", "overall_daily_cv",
     "meesho_demand_shape_tag", "overall_demand_shape_tag",
+    "supplier_priority", "slp", "group_id", "pid_created",
+    "biz_fin_category", "sscat", "portfolio", "super_portfolio", "is_new",
 ]
 
 
@@ -98,33 +121,72 @@ def load(name):
 
 
 def _round_raw(v):
-    # The warehouse returns most doubles at full float precision (15-17 significant digits,
-    # e.g. 0.42673992673992656) — noise well beyond what anyone reads on the "all columns"
-    # panel. Rounding to 4 decimal places here (same precision index.html already displays)
-    # cuts data/shards/*.json.gz roughly in half with no loss of anything a person would
-    # actually look at; it does NOT drop or omit any of the 64 columns.
     if isinstance(v, float):
         return round(v, 4)
     return v
 
 
+def _csv_ints(s):
+    if not s:
+        return []
+    return [int(x) for x in s.split(",") if x != ""]
+
+
+def _csv_vals(s):
+    # keep as raw strings (already ints as text from the SQL cast) for re-join; only offsets need
+    # int parsing for the cutoff comparison.
+    if not s:
+        return []
+    return s.split(",")
+
+
+def split_series(dod_row):
+    """Split one dod-export row's Jan1-Aug15 packed series into (main_90d, ext_full) dicts of
+    CSV strings, keyed the same way the shard "of/iv/pl/dp/ov" fields are."""
+    offsets = _csv_ints(dod_row.get("offsets", ""))
+    series = {
+        "of": _csv_vals(dod_row.get("offsets", "")),
+        "iv": _csv_vals(dod_row.get("inv", "")),
+        "dp": _csv_vals(dod_row.get("dispatched", "")),
+        "pl": _csv_vals(dod_row.get("ordered", "")),
+        "ov": _csv_vals(dod_row.get("overall", "")),
+    }
+    n = len(offsets)
+    main_idx = [i for i in range(n) if offsets[i] >= CUTOFF]
+
+    ext = {k: ",".join(series[k]) for k in ("of", "iv", "dp", "pl", "ov")}
+    main = {
+        "of": ",".join(str(offsets[i] - CUTOFF) for i in main_idx),
+        "iv": ",".join(series["iv"][i] for i in main_idx),
+        "dp": ",".join(series["dp"][i] for i in main_idx),
+        "pl": ",".join(series["pl"][i] for i in main_idx),
+        "ov": ",".join(series["ov"][i] for i in main_idx),
+    }
+    return main, ext
+
+
 def main():
     print("loading raw exports...")
-    main_rows = load("var_lvl_main_export.json")
-    dead_rows = load("var_lvl_dead_export.json")
-    rollup_rows = load("var_lvl_rollup_export.json")
-    print(f"  main={len(main_rows)} dead={len(dead_rows)} rollup={len(rollup_rows)}")
+    enriched_rows = load("roce_demand_enriched_export.json")
+    dod_rows = load("roce_demand_dod_export.json")
+    print(f"  enriched={len(enriched_rows)} dod={len(dod_rows)}")
 
     os.makedirs(os.path.join(OUT_DIR, "data", "shards"), exist_ok=True)
-    os.makedirs(os.path.join(OUT_DIR, "data", "dead"), exist_ok=True)
+    os.makedirs(os.path.join(OUT_DIR, "data", "ext"), exist_ok=True)
 
-    # ---- shards: group main_rows by (product_id, supplier_id) ----
+    dod_by_key = {}
+    for r in dod_rows:
+        dod_by_key[(r["product_id"], r["supplier_id"], r["variation_id"])] = r
+    n_missing_series = 0
+
+    # ---- group enriched rows by (product_id, supplier_id) ----
     combos = {}  # (p,s) -> list of variation dict
-    for r in main_rows:
+    for r in enriched_rows:
         p, s = r["product_id"], r["supplier_id"]
         combos.setdefault((p, s), []).append(r)
 
     shard_buckets = [dict() for _ in range(NSHARDS)]
+    ext_buckets = [dict() for _ in range(NSHARDS)]
     index_rows = []
 
     for (p, s), vrows in combos.items():
@@ -132,12 +194,21 @@ def main():
         key = f"{p}_{s}"
 
         var_list = []
+        ext_var_list = []
         for r in vrows:
+            dod_row = dod_by_key.get((r["product_id"], r["supplier_id"], r["variation_id"]))
+            if dod_row is None:
+                n_missing_series += 1
+                main_series = {"of": "", "iv": "", "dp": "", "pl": "", "ov": ""}
+                ext_series = main_series
+            else:
+                main_series, ext_series = split_series(dod_row)
+
             var_list.append({
                 "vid": r["variation_id"],
                 "vn": r.get("variation"),
-                "drr": r.get("total_drr"),
-                "mdrr": r.get("meesho_drr"),
+                "drr": r.get("inventory_drr"),
+                "mdrr": r.get("avg_drr_90d"),
                 "avg": r.get("avg_inventory"),
                 "min": r.get("min_inventory"),
                 "std": r.get("inv_std"),
@@ -158,51 +229,48 @@ def main():
                 "mdst": r.get("meesho_demand_shape_tag"),
                 "odst": r.get("overall_demand_shape_tag"),
                 "raw": [_round_raw(r.get(c)) for c in RAW_COLS],
-                "of": r.get("offsets", ""),
-                "iv": r.get("inv", ""),
-                "pl": r.get("ordered", ""),
-                "dp": r.get("dispatched", ""),
-                "ov": r.get("overall", ""),
+                "of": main_series["of"],
+                "iv": main_series["iv"],
+                "pl": main_series["pl"],
+                "dp": main_series["dp"],
+                "ov": main_series["ov"],
+            })
+            ext_var_list.append({
+                "vid": r["variation_id"],
+                "of": ext_series["of"],
+                "iv": ext_series["iv"],
+                "pl": ext_series["pl"],
+                "dp": ext_series["dp"],
+                "ov": ext_series["ov"],
             })
 
-        # default variation = highest total_orders (ties broken by highest drr)
-        default_var = max(
-            var_list,
-            key=lambda v: (v["orders"] or 0, v["drr"] or 0),
-        )
-
+        default_var = max(var_list, key=lambda v: (v["orders"] or 0, v["drr"] or 0))
         first = vrows[0]
 
         shard_buckets[shard_idx][key] = {
-            "p": p,
-            "s": s,
+            "p": p, "s": s,
             "spri": first.get("supplier_priority"),
             "dv": default_var["vid"],
             "vars": var_list,
         }
+        ext_buckets[shard_idx][key] = {"vars": ext_var_list}
 
-        # combo-level filter fields for is_new / meesho_demand_shape_tag / overall_demand_shape_tag:
-        # comma-joined unique values across this combo's variations, so the sidebar filter can
-        # match "any variation qualifies" (mirrors the "db"/dead_basis field on the sibling
-        # roce_inventory_var_lvl_new_dead site — ~10.6% of combos here disagree across variations,
-        # a very similar rate to that site's 5.5%).
         isnew_vals = sorted({str(r.get("is_new")) for r in vrows if r.get("is_new") is not None})
         mdst_vals = sorted({r.get("meesho_demand_shape_tag") for r in vrows if r.get("meesho_demand_shape_tag")})
         odst_vals = sorted({r.get("overall_demand_shape_tag") for r in vrows if r.get("overall_demand_shape_tag")})
 
         index_rows.append({
-            "p": p,
-            "s": s,
+            "p": p, "s": s,
             "sc": first.get("sscat"),
             "pf": first.get("portfolio"),
             "sp": first.get("super_portfolio"),
             "bf": first.get("biz_fin_category"),
             "spri": first.get("supplier_priority"),
-            "drr": sum((r.get("total_drr") or 0) for r in vrows),
-            "mdrr": sum((r.get("meesho_drr") or 0) for r in vrows),
+            "drr": sum((r.get("inventory_drr") or 0) for r in vrows),
+            "mdrr": sum((r.get("avg_drr_90d") or 0) for r in vrows),
             "avg": sum((r.get("avg_inventory") or 0) for r in vrows),
             "nr": sum((r.get("n_restocks") or 0) for r in vrows),
-            "dis": max((r.get("days_in_stock") or 0) for r in vrows),
+            "dis": max((r.get("instock_days") or 0) for r in vrows),
             "to": sum((r.get("total_orders") or 0) for r in vrows),
             "nv": len(vrows),
             "dv": default_var["vid"],
@@ -211,9 +279,10 @@ def main():
             "odst": ",".join(odst_vals),
         })
 
-    print(f"  {len(combos)} PID x SID combos, {len(main_rows)} variation rows")
+    print(f"  {len(combos)} PID x SID combos, {len(enriched_rows)} variation rows")
+    if n_missing_series:
+        print(f"  WARNING: {n_missing_series} variations had no matching DoD series row (left blank)")
 
-    # ---- write shards (gzip-compressed; index.html decodes via DecompressionStream) ----
     for i, bucket in enumerate(shard_buckets):
         if not bucket:
             continue
@@ -221,70 +290,31 @@ def main():
         with open(os.path.join(OUT_DIR, "data", "shards", f"{i}.json.gz"), "wb") as f:
             f.write(gzip.compress(payload, compresslevel=9))
 
-    # ---- write index.json ----
+    for i, bucket in enumerate(ext_buckets):
+        if not bucket:
+            continue
+        payload = json.dumps(bucket, separators=(",", ":")).encode("utf-8")
+        with open(os.path.join(OUT_DIR, "data", "ext", f"{i}.json.gz"), "wb") as f:
+            f.write(gzip.compress(payload, compresslevel=9))
+
     cols = ["p", "s", "sc", "pf", "sp", "bf", "spri", "drr", "mdrr", "avg", "nr", "dis", "to", "nv", "dv",
             "isnew", "mdst", "odst"]
     rows = [[r[c] for c in cols] for r in index_rows]
     index_doc = {
-        "anchor": ANCHOR,
+        "anchor": ANCHOR_MAIN,
+        "extAnchor": ANCHOR_EXT,
         "nshards": NSHARDS,
         "cols": cols,
         "rows": rows,
         "rawCols": RAW_COLS,
     }
-    with open(os.path.join(OUT_DIR, "data", "index.json"), "w") as f:
-        json.dump(index_doc, f, separators=(",", ":"))
-    print(f"  wrote index.json: {len(rows)} combos")
-
-    # ---- sid_roce.json ----
-    sid_roce = {}
-    field_order = [
-        "overall_roce", "overall_roce_dio_cycle", "overall_roce_dio_transit",
-        "overall_roce_dio_safety", "overall_roce_dso",
-        "reliable_roce_w_restock_filter", "reliable_roce_w_restock_filter_dio_cycle",
-        "reliable_roce_w_restock_filter_dio_transit", "reliable_roce_w_restock_filter_dio_safety",
-        "reliable_roce_w_restock_filter_dso",
-    ]
-    for r in rollup_rows:
-        sid_roce[str(r["supplier_id"])] = [r.get(f) for f in field_order]
-    with open(os.path.join(OUT_DIR, "data", "sid_roce.json"), "w") as f:
-        json.dump(sid_roce, f, separators=(",", ":"))
-    print(f"  wrote sid_roce.json: {len(sid_roce)} sellers")
-
-    # ---- dead/*.json ----
-    dead_buckets = [dict() for _ in range(NDEAD)]
-    dead_by_sid = {}
-    for r in dead_rows:
-        dead_by_sid.setdefault(r["supplier_id"], []).append(r)
-
-    n_dead_written = 0
-    for sid, rows_ in dead_by_sid.items():
-        shard_idx = sid % NDEAD
-        arr = []
-        for r in rows_:
-            arr.append([
-                r["product_id"],
-                r["variation_id"],
-                r.get("variation"),
-                r.get("sscat"),
-                r.get("avg_inventory"),
-                r.get("days_in_stock"),
-                r.get("n_restocks"),
-                r.get("total_drr"),
-                r.get("offsets", ""),
-                r.get("inv", ""),
-            ])
-            n_dead_written += 1
-        dead_buckets[shard_idx][str(sid)] = arr
-
-    for i, bucket in enumerate(dead_buckets):
-        if not bucket:
-            continue
-        payload = json.dumps(bucket, separators=(",", ":")).encode("utf-8")
-        with open(os.path.join(OUT_DIR, "data", "dead", f"{i}.json.gz"), "wb") as f:
-            f.write(gzip.compress(payload, compresslevel=9))
-    print(f"  wrote dead/*.json: {n_dead_written} dead combos across {len(dead_by_sid)} sellers")
-
+    # gzip-compressed (unlike the previous version's plain index.json) — at this scope's ~169k
+    # combos the plain JSON is ~31MB, which is a meaningfully slow first load; gzip cuts that a
+    # lot. index.html fetches it with the same DecompressionStream path used for shards.
+    payload = json.dumps(index_doc, separators=(",", ":")).encode("utf-8")
+    with open(os.path.join(OUT_DIR, "data", "index.json.gz"), "wb") as f:
+        f.write(gzip.compress(payload, compresslevel=9))
+    print(f"  wrote index.json.gz: {len(rows)} combos, {len(payload)} bytes raw")
     print("done.")
 
 

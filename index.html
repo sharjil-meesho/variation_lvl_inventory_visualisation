@@ -138,6 +138,8 @@ window.__plotlyReady = new Promise(function(resolve){
   }
   .toggle-btn:hover { background: var(--page); }
   .toggle-btn.active { background: var(--text-primary); color: #fff; border-color: var(--text-primary); }
+  #rangeToggleGroup .toggle-btn.active { background: #1f7a4d; border-color: #1f7a4d; }
+  #rangeToggleRow { margin-top: -6px; }
 
   .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; margin: 10px 0 14px; }
   .grid3 h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); margin: 0 0 8px; font-weight:700;}
@@ -155,15 +157,6 @@ window.__plotlyReady = new Promise(function(resolve){
   .chart-wrap { position: relative; }
   .empty-state { color: var(--text-muted); padding: 60px 0; text-align:center; font-size: 13px; }
   .err { color: var(--red); font-size: 13px; padding: 8px 0; }
-
-  .tooltip {
-    position: absolute; pointer-events:none; background: var(--text-primary); color: #fff;
-    font-size: 11.5px; padding: 4px 8px; border-radius: 4px; transform: translate(-50%,-115%);
-    white-space: nowrap; opacity: 0; transition: opacity .1s;
-    font-variant-numeric: tabular-nums;
-  }
-  select#deadSelect { width: 100%; }
-  .dead-line { font-size: 12.5px; font-weight: 600; margin: 8px 0 2px; }
 
   .raw-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 20px; }
   .raw-grid .rk {
@@ -219,7 +212,7 @@ window.__plotlyReady = new Promise(function(resolve){
       <select id="fMdst"><option value="">All</option></select>
       <label for="fOdst">Overall demand shape</label>
       <select id="fOdst"><option value="">All</option></select>
-      <div class="hint">Is new / demand-shape filters match a combo if <b>any</b> of its variations qualify — these 3 fields are set per variation, and ~10.6% of combos have variations that disagree.</div>
+      <div class="hint" id="disagreeHint">Is new / demand-shape filters match a combo if <b>any</b> of its variations qualify — these 3 fields are set per variation, and some combos have variations that disagree.</div>
       <div class="match-count" id="matchCount">loading…</div>
       <div class="browse-list" id="browseList"></div>
     </div>
@@ -253,6 +246,14 @@ window.__plotlyReady = new Promise(function(resolve){
           <button type="button" class="toggle-btn" data-val="dispatched">Dispatched orders</button>
           <button type="button" class="toggle-btn" data-val="overall">Overall orders</button>
         </div>
+      </div>
+      <div class="orders-toggle-row" id="rangeToggleRow" style="display:none">
+        <span class="otr-label">Date range</span>
+        <div class="toggle-group" id="rangeToggleGroup">
+          <button type="button" class="toggle-btn active" data-val="main">Last 90 days</button>
+          <button type="button" class="toggle-btn" data-val="ext">Expand to Jan 1 – Aug 15</button>
+        </div>
+        <span class="hint" id="rangeLoadingNote" style="margin:0 0 0 4px; display:none">loading…</span>
       </div>
       <div class="chart-wrap" id="chartWrap">
         <div class="empty-state">Look up a PID × SID, or pick one from the browse list, to see its chart.</div>
@@ -289,43 +290,18 @@ window.__plotlyReady = new Promise(function(resolve){
       </div>
       <div class="stackbar" id="roceBar"></div>
       <div class="legend" id="roceLegend"></div>
-      <div class="foot-note">DIO total = safety + cycle + transit (pipeline shown for context, excluded from ROCE). DSO = ODNR fraction × 7. Total ROCE (working-capital days) = DIO total + DSO. Source: scrap.roce_eqn__products_classification, selected variation only.</div>
+      <div class="foot-note">DIO total = safety + cycle + transit (pipeline shown for context, excluded from ROCE). DSO = ODNR fraction × 7. Total ROCE (working-capital days) = DIO total + DSO. "DRR" throughout this page is inventory_drr (an inventory-drawdown-implied demand rate), not an order-count DRR — see the all-columns panel below for avg_drr_90d and the other order-count DRR variants. Source: scrap.roce_demand_eqn__enriched, selected variation only.</div>
     </div>
 
     <div class="card" id="rawCard" style="display:none">
       <div class="headline">
         <div class="title">All columns · <span id="rawComboLabel"></span></div>
       </div>
-      <div class="hint" style="margin-top:0">Every column from scrap.roce_eqn__products_classification for the selected variation, raw — including columns already shown elsewhere on this page (e.g. supplier priority, sscat), for completeness.</div>
+      <div class="hint" style="margin-top:0">Every column from scrap.roce_demand_eqn__enriched for the selected variation, raw — including columns already shown elsewhere on this page (e.g. supplier priority, sscat), for completeness.</div>
       <div class="raw-grid" id="rawGrid" style="margin-top:10px"></div>
-      <div class="foot-note">Source: scrap.roce_eqn__products_classification, selected variation only. Numbers are rounded to 4 decimal places for display; nothing here is recomputed. The "meesho_*" / "overall_*" demand-shape diagnostic columns (early/mid/recent mean &amp; stddev, z-shifts, daily_cv) feed into meesho_demand_shape_tag / overall_demand_shape_tag but aren't otherwise used elsewhere on this page.</div>
+      <div class="foot-note">Source: scrap.roce_demand_eqn__enriched, selected variation only. Numbers are rounded to 4 decimal places for display; nothing here is recomputed. The "meesho_*" / "overall_*" demand-shape diagnostic columns (early/mid/recent mean &amp; stddev, z-shifts, daily_cv) feed into meesho_demand_shape_tag / overall_demand_shape_tag but aren't otherwise used elsewhere on this page.</div>
     </div>
 
-    <div class="card" id="sellerCard" style="display:none">
-      <div class="headline">
-        <div class="title">Seller-level ROCE (all PID × Variations) · seller <span id="sellerSidLabel"></span></div>
-      </div>
-      <label for="sellerVariant">Variant</label>
-      <select id="sellerVariant">
-        <option value="overall">Overall ROCE</option>
-        <option value="reliable">Reliable (restock-filtered)</option>
-      </select>
-      <div class="big-number" id="sellerTotal" style="margin-top:10px">–</div>
-      <div class="stackbar" id="sellerBar"></div>
-      <div class="legend" id="sellerLegend"></div>
-      <div class="foot-note" id="sellerFoot"></div>
-    </div>
-
-    <div class="card" id="deadCard" style="display:none">
-      <div class="headline">
-        <div class="title">Dead PID × Variations — random sample for this seller</div>
-        <div class="sub" id="deadN"></div>
-      </div>
-      <select id="deadSelect"></select>
-      <div class="dead-line" id="deadLine"></div>
-      <div class="chart-wrap" id="deadChartWrap"></div>
-      <div class="foot-note">Dead PID × Variations = is_dead=1 (meesho_drr &amp;&amp; total_drr both below 1 for that variation). Deterministic sample of up to 10 <i>plottable</i> dead combos per seller (avg inventory &gt; 0 and &ge; 5 days in stock). "dead_fg" is a heuristic proxy (avg inventory ÷ that variation's own total_drr, floored) — not a warehouse-computed field, treat it as an order-of-magnitude signal only.</div>
-    </div>
   </div>
 </div>
 
@@ -334,10 +310,13 @@ window.__plotlyReady = new Promise(function(resolve){
 
 // ---------- config ----------
 const NSHARDS = 256;
-const NDEAD = 64;
-const ANCHOR = "2026-04-01";
+// two view ranges: "main" is the default 90-day window, "ext" is the full Jan1-Aug15 window,
+// lazy-loaded from data/ext/ only when the user clicks "expand" on the chart.
+const ANCHOR_MAIN = "2026-05-18";
+const ANCHOR_EXT = "2026-01-01";
 const COLORS = { blue:"#2a78d6", orange:"#eb6834", aqua:"#1baf7a", yellow:"#eda100", magenta:"#e87ba4", green:"#008300", violet:"#4a3aa7", red:"#e34948" };
-const ANCHOR_MS = Date.parse(ANCHOR + "T00:00:00Z");
+const ANCHOR_MAIN_MS = Date.parse(ANCHOR_MAIN + "T00:00:00Z");
+const ANCHOR_EXT_MS = Date.parse(ANCHOR_EXT + "T00:00:00Z");
 
 // reference levels drawn on the day-on-day chart — same set as the PID-level sibling site.
 // "peak" (order-up-to est.) isn't a warehouse field; it's the same heuristic the PID-level
@@ -357,20 +336,38 @@ const ORDER_CFG = {
 let dodRenderGen = 0; // guards against a slow/stale render clobbering a newer one
 
 // ---------- state ----------
-let INDEX = null;         // {anchor,nshards,cols,rows}
+let INDEX = null;         // {anchor,extAnchor,nshards,cols,rows}
 let ROWS = [];             // array of row objects (decoded from cols/rows)
-let sidRoceMap = null;     // loaded once, big
 const shardCache = new Map();
-const deadCache = new Map();
+const extCache = new Map();      // lazy-loaded Jan1-Aug15 series, fetched only on "expand"
 let currentCombo = null;   // {p,s}
 let currentRec = null;     // shard record {p,s,dv,vars:[...]}
 let currentVarId = null;
 let orderOverlay = "none"; // "none" | "placed" | "dispatched" — which order series to overlay on the DoD chart
+let chartRange = "main";   // "main" (90d, default) | "ext" (Jan1-Aug15, lazy-loaded)
 
 document.querySelectorAll("#orderToggleGroup .toggle-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     orderOverlay = btn.dataset.val;
     document.querySelectorAll("#orderToggleGroup .toggle-btn").forEach(b => b.classList.toggle("active", b === btn));
+    if (currentRec) renderVariation();
+  });
+});
+
+document.querySelectorAll("#rangeToggleGroup .toggle-btn").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const val = btn.dataset.val;
+    if (val === chartRange) return;
+    if (val === "ext") {
+      document.getElementById("rangeLoadingNote").style.display = "inline";
+      try {
+        await loadExtShardFor(currentCombo.p);
+      } finally {
+        document.getElementById("rangeLoadingNote").style.display = "none";
+      }
+    }
+    chartRange = val;
+    document.querySelectorAll("#rangeToggleGroup .toggle-btn").forEach(b => b.classList.toggle("active", b === btn));
     if (currentRec) renderVariation();
   });
 });
@@ -407,8 +404,7 @@ function el(tag, attrs, children) {
 let ROWS_BY_KEY = new Map(); // "<p>_<s>" -> row, for O(1) combo-level lookups (sscat, biz_fin_category, ...)
 
 async function loadIndex() {
-  const res = await fetch("data/index.json");
-  INDEX = await res.json();
+  INDEX = await fetchGzipJson("data/index.json.gz");
   ROWS = INDEX.rows.map(r => {
     const o = {};
     INDEX.cols.forEach((c,i) => o[c] = r[i]);
@@ -417,6 +413,22 @@ async function loadIndex() {
   ROWS_BY_KEY = new Map(ROWS.map(r => [`${r.p}_${r.s}`, r]));
   buildFilterOptions();
   renderBrowseList();
+  updateDisagreeHint();
+}
+
+// computes the actual "combos with variations that disagree on is_new / meesho_demand_shape_tag
+// / overall_demand_shape_tag" rate for this scope, instead of quoting a hardcoded figure from a
+// different scope/table (the old ~10.6% figure was specific to the previous table).
+function updateDisagreeHint() {
+  if (!ROWS.length) return;
+  const disagree = ROWS.filter(r =>
+    (r.isnew && r.isnew.includes(",")) ||
+    (r.mdst && r.mdst.includes(",")) ||
+    (r.odst && r.odst.includes(","))
+  ).length;
+  const pct = (disagree / ROWS.length * 100).toFixed(1);
+  document.getElementById("disagreeHint").innerHTML =
+    `Is new / demand-shape filters match a combo if <b>any</b> of its variations qualify — these 3 fields are set per variation, and ${pct}% of combos here have variations that disagree.`;
 }
 
 async function fetchGzipJson(url) {
@@ -436,19 +448,14 @@ async function loadShardFor(p) {
   return val;
 }
 
-async function loadSidRoce() {
-  if (sidRoceMap) return sidRoceMap;
-  const res = await fetch("data/sid_roce.json");
-  sidRoceMap = await res.json();
-  return sidRoceMap;
-}
-
-async function loadDeadFor(s) {
-  const idx = s % NDEAD;
-  if (deadCache.has(idx)) return deadCache.get(idx);
-  const data = await fetchGzipJson(`data/dead/${idx}.json.gz`);
+// lazy-loaded Jan1-Aug15 series tree — only fetched when the user clicks "expand" on a chart,
+// to keep the default page weight down at this scope's ~166k-combo scale.
+async function loadExtShardFor(p) {
+  const idx = p % NSHARDS;
+  if (extCache.has(idx)) return extCache.get(idx);
+  const data = await fetchGzipJson(`data/ext/${idx}.json.gz`);
   const val = data || {};
-  deadCache.set(idx, val);
+  extCache.set(idx, val);
   return val;
 }
 
@@ -547,7 +554,7 @@ document.getElementById("lookupBtn").addEventListener("click", async () => {
   const shard = await loadShardFor(p);
   const rec = shard[`${p}_${s}`];
   if (!rec) {
-    errEl.textContent = `No qualifying combo found for ${p} / ${s} (it may not meet meesho_drr≥1 & total_drr≥1 on any variation, or may not exist).`;
+    errEl.textContent = `No qualifying combo found for ${p} / ${s} (it may not meet days_observed=90, instock_days≥45 & order_days≥10 on any variation, or may not exist).`;
     errEl.style.display = "block";
     return;
   }
@@ -585,16 +592,28 @@ async function selectCombo(p, s) {
   document.getElementById("bfTag").textContent = idxRow && idxRow.bf ? idxRow.bf : "";
 
   document.getElementById("ordersToggleRow").style.display = "flex";
+  document.getElementById("rangeToggleRow").style.display = "flex";
+  chartRange = "main";
+  document.querySelectorAll("#rangeToggleGroup .toggle-btn").forEach(b => b.classList.toggle("active", b.dataset.val === "main"));
 
   renderVariation();
-
-  // seller-level panels (independent of variation, keyed by seller)
-  await renderSellerRoce(s);
-  await renderDeadPanel(s);
 }
 
 function findVar(vid) {
   return currentRec.vars.find(v => v.vid === vid) || currentRec.vars[0];
+}
+
+// looks up the extended (Jan1-Aug15) series for the variation currently selected, if the ext
+// shard for this combo has already been lazy-loaded (via the "expand" toggle). Returns null if
+// not loaded yet or not found — callers should fall back to the main 90-day series.
+function findExtVar(vid) {
+  if (!currentCombo) return null;
+  const idx = currentCombo.p % NSHARDS;
+  const shard = extCache.get(idx);
+  if (!shard) return null;
+  const rec = shard[`${currentCombo.p}_${currentCombo.s}`];
+  if (!rec) return null;
+  return rec.vars.find(v => v.vid === vid) || null;
 }
 
 // ---------- main DOD chart + ROCE breakdown ----------
@@ -609,7 +628,7 @@ function renderVariation() {
   renderRawColumns(v);
 }
 
-// ---------- all-columns panel (scrap.roce_eqn__products_classification, raw) ----------
+// ---------- all-columns panel (scrap.roce_demand_eqn__enriched, raw) ----------
 function renderRawColumns(v) {
   document.getElementById("rawCard").style.display = "block";
   document.getElementById("rawComboLabel").textContent = `${currentCombo.p} / ${currentCombo.s} / ${v.vn || v.vid}`;
@@ -631,9 +650,19 @@ async function renderDodChart(v) {
   const myGen = ++dodRenderGen;
   const wrap = document.getElementById("chartWrap");
   wrap.innerHTML = `<div class="empty-state">loading chart…</div>`;
-  const offsets = csvNums(v.of);
-  const inv = csvNums(v.iv);
-  if (!offsets.length) { wrap.innerHTML = `<div class="empty-state">No series data for this variation.</div>`; return; }
+
+  // pick the active range's series — "ext" (Jan1-Aug15) if loaded and selected, else the
+  // default 90-day "main" series always carried on v itself. Static fields (saf/cyc/avg/min/drr)
+  // never change with range, only the plotted series + anchor date do.
+  let series = v, anchorMs = ANCHOR_MAIN_MS, usingExt = false;
+  if (chartRange === "ext") {
+    const extV = findExtVar(v.vid);
+    if (extV) { series = extV; anchorMs = ANCHOR_EXT_MS; usingExt = true; }
+  }
+
+  const offsets = csvNums(series.of);
+  const inv = csvNums(series.iv);
+  if (!offsets.length) { wrap.innerHTML = `<div class="empty-state">No series data for this variation${usingExt?" in the expanded range":""}.</div>`; return; }
 
   const ready = await window.__plotlyReady;
   if (myGen !== dodRenderGen) return; // a newer render started while we were waiting
@@ -642,7 +671,7 @@ async function renderDodChart(v) {
     return;
   }
 
-  const dates = offsets.map(o => new Date(ANCHOR_MS + o*86400000).toISOString().slice(0,10));
+  const dates = offsets.map(o => new Date(anchorMs + o*86400000).toISOString().slice(0,10));
   const delta = inv.map((val,i) => i===0 ? null : val - inv[i-1]);
 
   // restock heuristic — same as the PID-level sibling site: day-over-day jump ≥
@@ -689,7 +718,7 @@ async function renderDodChart(v) {
   let hasOrders = false;
   if (orderOverlay !== "none" && ORDER_CFG[orderOverlay]) {
     const cfg = ORDER_CFG[orderOverlay];
-    const ov = csvNums(v[cfg.key]);
+    const ov = csvNums(series[cfg.key]);
     if (ov.length === dates.length) {
       hasOrders = true;
       traces.push({x: dates, y: ov, mode: "lines", name: cfg.label, yaxis: "y2",
@@ -721,6 +750,7 @@ async function renderDodChart(v) {
     foot += ` ${ORDER_CFG[orderOverlay].label} shown on the right axis.`;
     if (orderOverlay === "overall") foot += ` "Overall orders" is an inventory-drop-derived estimate (day-over-day inventory decrease), not a logged order event.`;
   }
+  foot += usingExt ? ` Showing the expanded range (${ANCHOR_EXT} onward).` : ` Showing the default 90-day range (${ANCHOR_MAIN} onward) — click "Expand to Jan 1 – Aug 15" above for the fuller history.`;
   document.getElementById("chartFoot").textContent = foot;
 }
 
@@ -748,248 +778,6 @@ function renderRoceBreakdown(v) {
     {label:"DIO cycle", value: v.dcyc||0, color: COLORS.orange},
     {label:"DSO", value: v.dso||0, color: COLORS.aqua},
   ]);
-}
-
-// ---------- seller-level ROCE ----------
-async function renderSellerRoce(s) {
-  await loadSidRoce();
-  document.getElementById("sellerCard").style.display = "block";
-  document.getElementById("sellerSidLabel").textContent = s;
-  const variantSel = document.getElementById("sellerVariant");
-  variantSel.onchange = () => paintSellerRoce(s);
-  paintSellerRoce(s);
-}
-function paintSellerRoce(s) {
-  const arr = sidRoceMap[String(s)];
-  const variant = document.getElementById("sellerVariant").value;
-  const box = document.getElementById("sellerTotal");
-  if (!arr) {
-    box.textContent = "no data for this seller";
-    document.getElementById("sellerBar").innerHTML = "";
-    document.getElementById("sellerLegend").innerHTML = "";
-    document.getElementById("sellerFoot").textContent = "";
-    return;
-  }
-  // arr = [overall, overall_cyc, overall_tr, overall_saf, overall_dso, reliable, rel_cyc, rel_tr, rel_saf, rel_dso]
-  const base = variant === "overall" ? 0 : 5;
-  const total = arr[base], cyc = arr[base+1], tr = arr[base+2], saf = arr[base+3], dso = arr[base+4];
-  box.innerHTML = `${fmt(total)}<span class="unit">working-capital days (ROCE)</span>`;
-  renderStackBar("sellerBar", "sellerLegend", [
-    {label:"DIO safety", value: saf||0, color: COLORS.red},
-    {label:"DIO transit", value: tr||0, color: COLORS.blue},
-    {label:"DIO cycle", value: cyc||0, color: COLORS.orange},
-    {label:"DSO", value: dso||0, color: COLORS.aqua},
-  ]);
-  document.getElementById("sellerFoot").textContent = variant === "overall"
-    ? "All is_dead=0 PID×Variations for this seller, order-weighted. Total working-capital days = DIO(cycle+transit+safety) + DSO."
-    : "Restricted to is_dead=0 and n_restocks≥1 PID×Variations, order-weighted. Source: scrap.roce_eqn_var_sid_lvl_rollup_roce_kri.";
-}
-
-// ---------- dead panel ----------
-async function renderDeadPanel(s) {
-  const data = await loadDeadFor(s);
-  const arr = data[String(s)];
-  const card = document.getElementById("deadCard");
-  const sel = document.getElementById("deadSelect");
-  const nEl = document.getElementById("deadN");
-  card.style.display = "block";
-  sel.innerHTML = "";
-  document.getElementById("deadChartWrap").innerHTML = "";
-  document.getElementById("deadLine").textContent = "";
-  if (!arr || !arr.length) {
-    nEl.textContent = "n = 0";
-    sel.innerHTML = `<option>no dead PID × Variations sampled for this seller</option>`;
-    return;
-  }
-  nEl.textContent = `n = ${arr.length}`;
-  // record: [pid, vid, vn, sscat, avg, dis, nr, drr, of, iv]
-  arr.forEach((r, i) => {
-    const deadFg = r[7] > 0.001 ? r[4]/r[7] : null;
-    const o = document.createElement("option");
-    o.value = i;
-    o.textContent = `${r[0]} / ${r[2]||"(unnamed)"} · ${r[3]||"–"} · avg ${fmtInt(r[4])} · dead ~${deadFg?fmtInt(deadFg)+"d":"n/a"}`;
-    sel.appendChild(o);
-  });
-  sel.onchange = () => paintDeadChart(arr, parseInt(sel.value,10));
-  paintDeadChart(arr, 0);
-}
-function paintDeadChart(arr, i) {
-  const r = arr[i];
-  const [pid, vid, vn, sscat, avg, dis, nr, drr, ofCsv, ivCsv] = r;
-  document.getElementById("deadLine").textContent =
-    `${pid} / ${vn||"(unnamed)"} · ${sscat||"–"} · avg inventory ${fmtInt(avg)} · days in stock ${dis} · restocks ${nr} · total_drr ${fmt(drr,2)}`;
-  const offsets = csvNums(ofCsv);
-  const inv = csvNums(ivCsv);
-  const wrap = document.getElementById("deadChartWrap");
-  wrap.innerHTML = "";
-  if (!offsets.length) { wrap.innerHTML = `<div class="empty-state">No series.</div>`; return; }
-  const svg = buildLineChart({
-    width: 900, height: 260,
-    x: offsets, y: inv,
-    lineColor: "#8a8a86",
-    refLines: [{y: avg, color: COLORS.red, label: "avg inventory"}],
-    markerIdx: [],
-    yLabel: "live inventory",
-    tooltipLabel: (idx) => `day ${offsets[idx]} · inv ${fmtInt(inv[idx])}`,
-  });
-  wrap.appendChild(svg);
-}
-
-// ---------- generic SVG line chart ----------
-function buildLineChart(opts) {
-  const { width, height, x, y, lineColor, refLines=[], markerIdx=[], tooltipLabel, barSeries=null } = opts;
-  const padL = 50, padR = barSeries ? 54 : 16, padT = 16, padB = 28;
-  const plotW = width - padL - padR, plotH = height - padT - padB;
-  const xMin = Math.min(...x), xMax = Math.max(...x);
-  const yMax = Math.max(...y, ...refLines.map(r=>r.y||0)) * 1.08 || 1;
-  const yMin = 0;
-  const xScale = (v) => padL + (xMax===xMin ? 0 : (v-xMin)/(xMax-xMin)) * plotW;
-  const yScale = (v) => padT + plotH - ((v-yMin)/(yMax-yMin||1)) * plotH;
-
-  let y2Max = 1, y2Scale = null;
-  if (barSeries) {
-    y2Max = Math.max(...barSeries.values, 1) * 1.25;
-    y2Scale = (v) => padT + plotH - (v/y2Max) * plotH;
-  }
-
-  const svgns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(svgns, "svg");
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("width", "100%");
-  svg.setAttribute("height", height);
-  svg.style.display = "block";
-
-  // gridlines (y)
-  const ticks = 5;
-  for (let i=0;i<=ticks;i++) {
-    const val = yMin + (yMax-yMin)*i/ticks;
-    const yy = yScale(val);
-    const gl = document.createElementNS(svgns, "line");
-    gl.setAttribute("x1", padL); gl.setAttribute("x2", width-padR);
-    gl.setAttribute("y1", yy); gl.setAttribute("y2", yy);
-    gl.setAttribute("stroke", "var(--grid)"); gl.setAttribute("stroke-width", "1");
-    svg.appendChild(gl);
-    const lbl = document.createElementNS(svgns, "text");
-    lbl.setAttribute("x", padL-8); lbl.setAttribute("y", yy+4);
-    lbl.setAttribute("text-anchor","end"); lbl.setAttribute("font-size","10.5");
-    lbl.setAttribute("fill","var(--text-muted)");
-    lbl.textContent = fmtInt(val);
-    svg.appendChild(lbl);
-  }
-  // x ticks (start/mid/end)
-  [0, 0.5, 1].forEach(f => {
-    const val = xMin + (xMax-xMin)*f;
-    const xx = xScale(val);
-    const lbl = document.createElementNS(svgns, "text");
-    lbl.setAttribute("x", xx); lbl.setAttribute("y", height-8);
-    lbl.setAttribute("text-anchor", f===0?"start":f===1?"end":"middle");
-    lbl.setAttribute("font-size","10.5"); lbl.setAttribute("fill","var(--text-muted)");
-    lbl.textContent = "day " + Math.round(val);
-    svg.appendChild(lbl);
-  });
-
-  // secondary-axis bar overlay (dispatched/placed orders), drawn under the line + ref lines
-  if (barSeries) {
-    const n = x.length;
-    const slotW = plotW / n;
-    const barW = Math.max(1, slotW * 0.6);
-    barSeries.values.forEach((val, i) => {
-      if (!val) return;
-      const bx = xScale(x[i]) - barW/2;
-      const by = y2Scale(val);
-      const rect = document.createElementNS(svgns, "rect");
-      rect.setAttribute("x", bx.toFixed(1));
-      rect.setAttribute("y", by.toFixed(1));
-      rect.setAttribute("width", barW.toFixed(1));
-      rect.setAttribute("height", (padT+plotH-by).toFixed(1));
-      rect.setAttribute("fill", barSeries.color);
-      rect.setAttribute("opacity", "0.5");
-      rect.setAttribute("rx", "1");
-      svg.appendChild(rect);
-    });
-    // right-axis ticks, colored to match the bar series (identifies which axis is which)
-    const ticks2 = 3;
-    for (let i=0;i<=ticks2;i++) {
-      const val = y2Max*i/ticks2;
-      const yy = y2Scale(val);
-      const lbl = document.createElementNS(svgns, "text");
-      lbl.setAttribute("x", width-padR+8); lbl.setAttribute("y", yy+4);
-      lbl.setAttribute("text-anchor","start"); lbl.setAttribute("font-size","10.5");
-      lbl.setAttribute("fill", barSeries.color);
-      lbl.textContent = fmtInt(val);
-      svg.appendChild(lbl);
-    }
-  }
-
-  // reference lines
-  refLines.forEach(r => {
-    const yy = yScale(r.y);
-    const rl = document.createElementNS(svgns, "line");
-    rl.setAttribute("x1", padL); rl.setAttribute("x2", width-padR);
-    rl.setAttribute("y1", yy); rl.setAttribute("y2", yy);
-    rl.setAttribute("stroke", r.color); rl.setAttribute("stroke-width","1.5");
-    rl.setAttribute("stroke-dasharray","4,3");
-    svg.appendChild(rl);
-  });
-
-  // main line
-  let d = "";
-  x.forEach((xv, i) => {
-    const px = xScale(xv), py = yScale(y[i]);
-    d += (i===0? "M":"L") + px.toFixed(1) + "," + py.toFixed(1) + " ";
-  });
-  const path = document.createElementNS(svgns, "path");
-  path.setAttribute("d", d);
-  path.setAttribute("fill","none");
-  path.setAttribute("stroke", lineColor);
-  path.setAttribute("stroke-width","2");
-  path.setAttribute("stroke-linejoin","round");
-  path.setAttribute("stroke-linecap","round");
-  svg.appendChild(path);
-
-  // restock markers
-  markerIdx.forEach(i => {
-    const c = document.createElementNS(svgns, "circle");
-    c.setAttribute("cx", xScale(x[i])); c.setAttribute("cy", yScale(y[i]));
-    c.setAttribute("r", "4.5");
-    c.setAttribute("fill", opts.markerColor || "var(--orange)");
-    c.setAttribute("stroke", "var(--surface-1)"); c.setAttribute("stroke-width","2");
-    svg.appendChild(c);
-  });
-
-  // hover layer
-  if (tooltipLabel) {
-    const wrapDiv = el("div", {style:"position:relative"});
-    const tip = el("div", {class:"tooltip"});
-    const hitRect = document.createElementNS(svgns, "rect");
-    hitRect.setAttribute("x", padL); hitRect.setAttribute("y", padT);
-    hitRect.setAttribute("width", plotW); hitRect.setAttribute("height", plotH);
-    hitRect.setAttribute("fill", "transparent");
-    const cursorLine = document.createElementNS(svgns, "line");
-    cursorLine.setAttribute("y1", padT); cursorLine.setAttribute("y2", padT+plotH);
-    cursorLine.setAttribute("stroke","var(--baseline)"); cursorLine.setAttribute("stroke-width","1");
-    cursorLine.style.display = "none";
-    svg.appendChild(cursorLine);
-    svg.appendChild(hitRect);
-    hitRect.addEventListener("mousemove", (e) => {
-      const rect = svg.getBoundingClientRect();
-      const relX = (e.clientX - rect.left) * (width/rect.width);
-      let closest = 0, bestD = Infinity;
-      x.forEach((xv,i) => { const d2 = Math.abs(xScale(xv)-relX); if (d2<bestD){bestD=d2; closest=i;} });
-      cursorLine.style.display = "block";
-      cursorLine.setAttribute("x1", xScale(x[closest])); cursorLine.setAttribute("x2", xScale(x[closest]));
-      tip.style.opacity = "1";
-      tip.style.left = (rect.width * (xScale(x[closest])/width)) + "px";
-      tip.style.top = (rect.height * (yScale(y[closest])/height)) + "px";
-      tip.textContent = tooltipLabel(closest);
-    });
-    hitRect.addEventListener("mouseleave", () => { tip.style.opacity="0"; cursorLine.style.display="none"; });
-    wrapDiv.appendChild(svg);
-    wrapDiv.appendChild(tip);
-    return wrapDiv;
-  }
-
-  return svg;
 }
 
 // ---------- stacked bar + legend ----------

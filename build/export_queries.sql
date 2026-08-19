@@ -1,181 +1,132 @@
--- Presto/Trino queries (Metabase "Presto Prod File Download", database id 9) used to pull the
--- three raw JSON exports that build_data.py turns into data/. Run each via Metabase's native
--- query editor, or via the /api/dataset/json fetch pattern (see HANDOFF-style notes below).
---
--- All three use array_agg(... ORDER BY log_date) to pack the 91-day series into one row per
--- PID x SID x Variation (or per dead-sample combo), instead of pulling one row per day —
--- this keeps row counts in the tens-of-thousands instead of millions, which matters because
--- scrap.roce_eqn__inventory_logs_apr_jun_oms_w_orders is 5.46 BILLION rows (26.4M PIDs) —
--- the full meesholink-supplier universe, not pre-filtered to this site's PID x Variation set.
--- A plain per-day pull for our ~72k qualifying combos alone would be ~6.4M rows; packed, it's
--- 72,397 rows. Presto handles the underlying full-table join in well under its 3-minute limit
--- (observed ~90s for the main pull, ~90s for the dead-sample pull, on 2026-08-06).
+-- Presto/Trino queries (Metabase "Presto Prod File Download", database id 9) + one Spark SQL
+-- scrap-table build (Inhouse Notebook kernel) used to pull the two raw JSON exports that
+-- build_data.py turns into data/. This replaces the 2026-08-13 version of this file (which read
+-- scrap.roce_eqn__products_classification + scrap.roce_eqn__inventory_logs_apr_jun_oms_w_orders).
 --
 -- ============================================================================
--- 2026-08-13 UPDATE: base table swapped from scrap.roce_eqn__var_lvl_calcs_kri_enriched to
--- scrap.roce_eqn__products_classification (64 columns vs the old table's ~29 — same
--- product_id/supplier_id/variation_id grain, same meesho_drr>=1 & total_drr>=1 population:
--- confirmed via count query on 2026-08-13 to yield the EXACT same 72,397 rows / 50,113
--- PID×SID combos / 45,358 products / 4,754 sellers as the old table under the identical
--- filter — this is a clean drop-in replacement, not a scope change. The new table adds
--- is_new, meesho_demand_shape_tag, overall_demand_shape_tag (now used as sidebar filters —
--- see build_data.py) plus ~28 supporting demand-shape diagnostic columns (early/mid/recent
--- mean & stddev, z-shifts, daily_cv — each computed twice, once "meesho"-only and once
--- "overall") and first_order_date/span_days/group_id/category_group. All 64 columns from
--- this table are pulled and passed through to data/shards/*.json.gz as each variation's
--- "raw" array (see the "all columns" panel in index.html) — that's why the main query below
--- selects every column via arbitrary(b.col) instead of the old query's shorter explicit list.
--- The dead-sample query (query 2) was swapped to the same table too, confirmed via count
--- query to yield the identical 23,537,749-row / 11,452-seller is_dead=1 population as the
--- old table — same sample, same seller coverage.
+-- WHY A SCRAP TABLE THIS TIME (read this before re-running the pull)
+-- ============================================================================
+-- The new day-on-day source table, scrap.roce_eqn__inventory_oms_dod_final, is NOT pre-filtered
+-- to any SKU scope the way the old apr_jun table was — it's the full catalog, every product,
+-- every supplier, every day. Just the 90-day window (2026-05-18 -> 2026-08-15) is 5.78 BILLION
+-- rows (28M distinct products, 12,244 suppliers); the full 2026-01-01 -> 2026-08-15 window this
+-- site now needs is proportionally larger still.
+--
+-- Joining that directly against our ~166k-combo qualifying keyset (from
+-- scrap.roce_demand_eqn__enriched) inside Metabase/Presto FAILS — even at a 500-row test scale —
+-- with "Query exceeded distributed user memory limit of 150GB". A semi-join (tuple IN-subquery)
+-- filter avoids the memory blowup but is still a full 5.78B+-row scan every time, which is far
+-- too slow to repeat 16x for chunked pulls.
+--
+-- The fix: materialize a small scrap table ONCE via Spark SQL (Path B / the Inhouse Notebook
+-- kernel — Metabase's Presto connection does not have SELECT permission on these tables via
+-- Databricks, only via its own separate Presto/Hive-metastore grant, so the join has to happen in
+-- Spark, reading the SHORT table names — no hive_metastore. prefix on reads, only on the CREATE
+-- target):
+--
+--   CREATE TABLE hive_metastore.scrap.roce_demand_dod_jan_aug AS
+--   SELECT a.product_id, a.supplier_id, a.variation_id, a.log_date, a.live_inventory,
+--          a.dispatched_orders, a.ordered_orders, a.overall_orders
+--   FROM scrap.roce_eqn__inventory_oms_dod_final a
+--   JOIN (
+--     SELECT product_id, supplier_id, variation_id
+--     FROM scrap.roce_demand_eqn__enriched
+--     WHERE days_observed = 90 AND instock_days >= 45 AND order_days >= 10
+--   ) b
+--   ON a.product_id = b.product_id AND a.supplier_id = b.supplier_id AND a.variation_id = b.variation_id
+--   WHERE a.log_date >= date('2026-01-01') AND a.log_date <= date('2026-08-15');
+--
+-- Confirmed with the user before running (2026-08-19) — this is a write (CREATE TABLE) to the
+-- warehouse. Took ~80s to build. Result: 57,990,021 rows / 161,572 distinct products, exactly
+-- 2026-01-01 -> 2026-08-15 as requested. All subsequent reads of the DoD series go through this
+-- scrap table (short name scrap.roce_demand_dod_jan_aug), which Metabase/Presto handles fine —
+-- it's ~58M rows, not billions.
+--
+-- If this table ever needs a full refresh, re-run the CREATE above (DROP TABLE IF EXISTS first,
+-- or CREATE OR REPLACE TABLE, confirming with the user either way — see the
+-- meesho-warehouse-browser-sql skill's safety rules on writes).
 -- ============================================================================
 
 -- ============================================================================
--- 1. var_lvl_main_export.json — one row per qualifying PID x SID x Variation
---    (meesho_drr>=1 AND total_drr>=1). 72,397 rows as of 2026-08-13 (unchanged population
---    after the table swap above).
+-- 1. roce_demand_enriched_export.json — one row per qualifying PID x SID x Variation from
+--    scrap.roce_demand_eqn__enriched. 284,020 rows / 166,398 PID x SID combos / 6,399 sellers
+--    (confirmed via count query 2026-08-18) — no DRR floor, no supplier restriction; scope is
+--    entirely defined by this WHERE clause. All 83 columns of the table, straight SELECT (no
+--    GROUP BY needed — one row per key already).
 --
---    "overall" (overall_orders) added 2026-08-08 after the user rebuilt
---    scrap.roce_eqn__inventory_logs_apr_jun_oms_w_orders to add an inventory-drop-derived
---    order estimate: their CASE statement sets overall_orders = (live_inventory -
---    prev_inventory) only when inventory dropped day-over-day, else null — i.e. always <= 0
---    as written. We flip the sign here (-1 * a.overall_orders) so it packs as a positive
---    order count, consistent with dispatched/ordered — confirmed with the user (2026-08-08).
---
---    b's columns are all functionally dependent on (product_id, supplier_id, variation_id) —
---    there's exactly one products_classification row per that key — so arbitrary(b.col) is
---    used instead of a 64-column GROUP BY list; it just picks the (only) value deterministically.
+--    Pulled in 16 chunks (product_id % 16 = 0..15) purely to keep each Metabase response small
+--    (full unchunked pull is ~650MB of raw JSON text) — chunk, don't re-filter the population.
 -- ============================================================================
 select
-  b.product_id, b.supplier_id, b.variation_id,
-  arbitrary(b.variation) as variation,
-  arbitrary(b.biz_fin_category) as biz_fin_category,
-  arbitrary(b.sscat) as sscat,
-  arbitrary(b.portfolio) as portfolio,
-  arbitrary(b.super_portfolio) as super_portfolio,
-  arbitrary(b.total_drr) as total_drr,
-  arbitrary(b.meesho_drr) as meesho_drr,
-  arbitrary(b.days_observed) as days_observed,
-  arbitrary(b.days_in_stock) as days_in_stock,
-  arbitrary(b.avg_inventory) as avg_inventory,
-  arbitrary(b.min_inventory) as min_inventory,
-  arbitrary(b.inv_std) as inv_std,
-  arbitrary(b.n_restocks) as n_restocks,
-  arbitrary(b.safety_stock) as safety_stock,
-  arbitrary(b.cycle_stock) as cycle_stock,
-  arbitrary(b.restock_interval) as restock_interval,
-  arbitrary(b.dio_safety) as dio_safety,
-  arbitrary(b.dio_cycle) as dio_cycle,
-  arbitrary(b.dio_transit) as dio_transit,
-  arbitrary(b.dio_pipeline) as dio_pipeline,
-  arbitrary(b.total_orders) as total_orders,
-  arbitrary(b.is_dead) as is_dead,
-  arbitrary(b.dso) as dso,
-  arbitrary(b.odnr_frac) as odnr_frac,
-  arbitrary(b.nbyg_frac) as nbyg_frac,
-  arbitrary(b.supplier_priority) as supplier_priority,
-  arbitrary(b.slp) as slp,
-  arbitrary(b.group_id) as group_id,
-  arbitrary(cast(b.pid_created as varchar)) as pid_created,
-  arbitrary(b.category_group) as category_group,
-  arbitrary(cast(b.first_order_date as varchar)) as first_order_date,
-  arbitrary(b.span_days) as span_days,
-  arbitrary(b.is_new) as is_new,
-  arbitrary(b.max_daily_orders) as max_daily_orders,
-  arbitrary(b.active_window_days) as active_window_days,
-  arbitrary(b.zero_days) as zero_days,
-  arbitrary(b.early_mean) as early_mean,
-  arbitrary(b.mid_mean) as mid_mean,
-  arbitrary(b.recent_mean) as recent_mean,
-  arbitrary(b.early_stddev) as early_stddev,
-  arbitrary(b.mid_stddev) as mid_stddev,
-  arbitrary(b.z_shift_recent_vs_mid) as z_shift_recent_vs_mid,
-  arbitrary(b.z_shift_mid_vs_early) as z_shift_mid_vs_early,
-  arbitrary(b.abs_shift_recent_vs_mid) as abs_shift_recent_vs_mid,
-  arbitrary(b.abs_shift_mid_vs_early) as abs_shift_mid_vs_early,
-  arbitrary(b.daily_cv) as daily_cv,
-  arbitrary(b.overall_total_orders) as overall_total_orders,
-  arbitrary(b.overall_max_daily_orders) as overall_max_daily_orders,
-  arbitrary(b.overall_zero_days) as overall_zero_days,
-  arbitrary(b.overall_early_mean) as overall_early_mean,
-  arbitrary(b.overall_mid_mean) as overall_mid_mean,
-  arbitrary(b.overall_recent_mean) as overall_recent_mean,
-  arbitrary(b.overall_early_stddev) as overall_early_stddev,
-  arbitrary(b.overall_mid_stddev) as overall_mid_stddev,
-  arbitrary(b.overall_z_shift_recent_vs_mid) as overall_z_shift_recent_vs_mid,
-  arbitrary(b.overall_z_shift_mid_vs_early) as overall_z_shift_mid_vs_early,
-  arbitrary(b.overall_abs_shift_recent_vs_mid) as overall_abs_shift_recent_vs_mid,
-  arbitrary(b.overall_abs_shift_mid_vs_early) as overall_abs_shift_mid_vs_early,
-  arbitrary(b.overall_daily_cv) as overall_daily_cv,
-  arbitrary(b.meesho_demand_shape_tag) as meesho_demand_shape_tag,
-  arbitrary(b.overall_demand_shape_tag) as overall_demand_shape_tag,
-  array_join(array_agg(cast(date_diff('day', date('2026-04-01'), a.log_date) as varchar) order by a.log_date), ',') as offsets,
-  array_join(array_agg(cast(coalesce(a.live_inventory,0) as varchar) order by a.log_date), ',') as inv,
-  array_join(array_agg(cast(coalesce(a.dispatched_orders,0) as varchar) order by a.log_date), ',') as dispatched,
-  array_join(array_agg(cast(coalesce(a.ordered_orders,0) as varchar) order by a.log_date), ',') as ordered,
-  array_join(array_agg(cast(coalesce(-1*a.overall_orders,0) as varchar) order by a.log_date), ',') as overall
-from scrap.roce_eqn__inventory_logs_apr_jun_oms_w_orders a
-join scrap.roce_eqn__products_classification b
-  on a.product_id=b.product_id and a.supplier_id=b.supplier_id and a.variation_id=b.variation_id
-where a.log_date between date('2026-04-01') and date('2026-06-30')
-  and b.meesho_drr >= 1 and b.total_drr >= 1
-group by b.product_id, b.supplier_id, b.variation_id;
+  product_id, supplier_id, variation_id, variation,
+  days_observed, instock_days, oos_days, order_days,
+  avg_drr_7d, median_drr_7d, avg_drr_15d, median_drr_15d, avg_drr_30d, median_drr_30d, stddev_drr_30d,
+  avg_drr_60d, median_drr_60d, stddev_drr_60d, avg_drr_90d, median_drr_90d, stddev_drr_90d,
+  total_orders_90d, total_transit_stock, odnr_perc, inventory_drr, meesho_drr_inv,
+  outlier_removed_inventory_drr, outlier_removed_meesho_drr_inv,
+  avg_inventory, min_inventory, inv_std, n_restocks, safety_stock, cycle_stock, restock_interval,
+  dio_safety, dio_cycle, dio_transit, dio_pipeline, total_orders, is_dead, dso, odnr_frac, nbyg_frac,
+  cast(first_order_date as varchar) as first_order_date, span_days, max_daily_orders, active_window_days, zero_days,
+  early_mean, mid_mean, recent_mean, early_stddev, mid_stddev, z_shift_recent_vs_mid, z_shift_mid_vs_early,
+  abs_shift_recent_vs_mid, abs_shift_mid_vs_early, daily_cv,
+  overall_total_orders, overall_max_daily_orders, overall_zero_days, overall_early_mean, overall_mid_mean, overall_recent_mean,
+  overall_early_stddev, overall_mid_stddev, overall_z_shift_recent_vs_mid, overall_z_shift_mid_vs_early,
+  overall_abs_shift_recent_vs_mid, overall_abs_shift_mid_vs_early, overall_daily_cv,
+  meesho_demand_shape_tag, overall_demand_shape_tag,
+  supplier_priority, slp, group_id, cast(pid_created as varchar) as pid_created,
+  biz_fin_category, sscat, portfolio, super_portfolio, is_new
+from scrap.roce_demand_eqn__enriched
+where days_observed = 90 and instock_days >= 45 and order_days >= 10
+  and product_id % 16 = <k>;   -- run for k = 0..15, concatenate the 16 JSON arrays into one file
 
 -- ============================================================================
--- 2. var_lvl_dead_export.json — deterministic 10-per-seller dead PID x Variation sample.
---    "Plottable" = avg_inventory > 0 and days_in_stock >= 5 (about half of all dead combos
---    sit at zero inventory and would chart as flat/empty lines — same product choice as the
---    original PID-level site). Sample is stable via md5-hash row_number, not rand(), so it
---    doesn't shift on re-run. 109,460 rows across 11,452 sellers as of 2026-08-06 — confirmed
---    identical (23,537,749-row / 11,452-seller pre-sample population) after the 2026-08-13
---    table swap to scrap.roce_eqn__products_classification below.
+-- 2. roce_demand_dod_export.json — one row per qualifying PID x SID x Variation, with 5 packed
+--    day-on-day series covering the FULL 2026-01-01 -> 2026-08-15 range (227 days), anchored at
+--    2026-01-01 (offset 0 = 2026-01-01). build_data.py slices this into the default 90-day shard
+--    series (offset >= 137, i.e. 2026-05-18 onward, re-based to 0) and the full-range "ext"
+--    series (used only when the user clicks "expand" on the chart) from the SAME pulled row —
+--    this is pulled ONCE per scope, not twice.
+--
+--    "overall" is sign-flipped (-1 * overall_orders) for the same reason as every prior version
+--    of this site: the source column is (live_inventory - prev_inventory) only on a day
+--    inventory *dropped*, i.e. always <= 0 as stored.
+--
+--    Reads from the pre-filtered scrap table (see the "why a scrap table" note above) — NOT
+--    directly from scrap.roce_eqn__inventory_oms_dod_final.
 -- ============================================================================
-with ranked as (
-  select product_id, supplier_id, variation_id, variation, sscat, avg_inventory, days_in_stock, n_restocks, total_drr,
-    row_number() over (partition by supplier_id order by md5(to_utf8(concat(cast(product_id as varchar),'_',cast(variation_id as varchar))))) as rn
-  from scrap.roce_eqn__products_classification
-  where is_dead = 1 and avg_inventory > 0 and days_in_stock >= 5
-),
-sample as (
-  select * from ranked where rn <= 10
-)
 select
-  s.product_id, s.supplier_id, s.variation_id, s.variation, s.sscat, s.avg_inventory, s.days_in_stock, s.n_restocks, s.total_drr,
-  array_join(array_agg(cast(date_diff('day', date('2026-04-01'), a.log_date) as varchar) order by a.log_date), ',') as offsets,
-  array_join(array_agg(cast(coalesce(a.live_inventory,0) as varchar) order by a.log_date), ',') as inv
-from scrap.roce_eqn__inventory_logs_apr_jun_oms_w_orders a
-join sample s on a.product_id=s.product_id and a.supplier_id=s.supplier_id and a.variation_id=s.variation_id
-where a.log_date between date('2026-04-01') and date('2026-06-30')
-group by s.product_id, s.supplier_id, s.variation_id, s.variation, s.sscat, s.avg_inventory, s.days_in_stock, s.n_restocks, s.total_drr;
+  product_id, supplier_id, variation_id,
+  array_join(array_agg(cast(date_diff('day', date('2026-01-01'), log_date) as varchar) order by log_date), ',') as offsets,
+  array_join(array_agg(cast(coalesce(live_inventory,0) as varchar) order by log_date), ',') as inv,
+  array_join(array_agg(cast(coalesce(dispatched_orders,0) as varchar) order by log_date), ',') as dispatched,
+  array_join(array_agg(cast(coalesce(ordered_orders,0) as varchar) order by log_date), ',') as ordered,
+  array_join(array_agg(cast(coalesce(-1*overall_orders,0) as varchar) order by log_date), ',') as overall
+from scrap.roce_demand_dod_jan_aug
+where product_id % 16 = <k>   -- run for k = 0..15, concatenate the 16 JSON arrays into one file
+group by product_id, supplier_id, variation_id;
 
 -- ============================================================================
--- 3. var_lvl_rollup_export.json — seller-level ROCE rollup, straight passthrough.
---    Only 2 ROCE variants exist in this table (unlike the old PID-level site's 5):
---    overall (all is_dead=0 combos) and reliable_w_restock_filter (is_dead=0 AND n_restocks>=1,
---    NOT additionally filtered to avg_inventory<=15000 the way the old "reliable"/"worf"
---    variants were). 7,937 rows. Unaffected by the 2026-08-13 table swap above — this query
---    still sources scrap.roce_eqn_var_sid_lvl_rollup_roce_kri, which the user didn't ask to
---    change.
+-- Removed from this version (confirmed with the user 2026-08-19 — dropped, not replaced):
+--   - The seller-level ROCE rollup query (previously read scrap.roce_eqn_var_sid_lvl_rollup_roce_kri)
+--     — no analogue pulled, no sid_roce.json output, no Seller ROCE panel in index.html.
+--   - The dead PID x Variation sample query — no dead-sample pull, no data/dead/ output, no Dead
+--     panel in index.html.
 -- ============================================================================
-select supplier_id,
-  reliable_roce_w_restock_filter_dio_cycle, reliable_roce_w_restock_filter_dio_transit,
-  reliable_roce_w_restock_filter_dio_safety, reliable_roce_w_restock_filter_dso, reliable_roce_w_restock_filter,
-  overall_roce_dio_cycle, overall_roce_dio_transit, overall_roce_dio_safety, overall_roce_dso, overall_roce
-from scrap.roce_eqn_var_sid_lvl_rollup_roce_kri;
 
 -- ============================================================================
--- Pull mechanics: run each query in Metabase's native SQL editor (Presto Prod File Download,
--- database id 9), then use the browser JS console (or Claude in Chrome's javascript_tool) to
--- call the same query through the JSON API and download the result as gzip directly, e.g.:
+-- Pull mechanics: both queries above were run in 16 chunks each (product_id % 16), inside the
+-- browser via Claude-in-Chrome's javascript_tool hitting Metabase's JSON API directly —
 --
 --   const res = await fetch('/api/dataset/json', {
 --     method: 'POST',
 --     headers: {'content-type': 'application/x-www-form-urlencoded'},
 --     body: new URLSearchParams({query: JSON.stringify({database: 9, type: 'native', native: {query: SQL}})})
 --   });
---   const text = await res.text();  // one row per line of JSON array — no ~16,600-row UI cap
---                                    -- hit here; tested up to 100k+ rows in one call.
+--   const text = await res.text();
 --
--- gzip client-side (CompressionStream) before triggering the download, then run
--- build/build_data.py against the three decompressed JSON files.
+-- — chunking purely to keep each response small (~40MB/chunk instead of one ~650MB / ~500MB
+-- response), NOT because any single chunk query is close to Metabase's 3-minute runtime limit.
+-- Chunks were concatenated into one JSON array per query, gzip-compressed (CompressionStream),
+-- and downloaded via a Blob + anchor "download" trigger, then staged into the build environment
+-- through the device file bridge — same mechanics as the previous version of this file.
 -- ============================================================================
